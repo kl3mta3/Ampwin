@@ -18,6 +18,14 @@ function ytdlpPath(): string {
   return join(app.getPath('userData'), 'bin', 'yt-dlp.exe')
 }
 
+/** The copy shipped inside the app (read-only). Used to seed the writable
+ *  userData copy on first run so no download is needed. */
+function bundledYtDlpPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'bin', 'yt-dlp.exe')
+    : join(app.getAppPath(), 'build', 'bin', 'yt-dlp.exe')
+}
+
 export function cookiesPath(): string {
   return join(app.getPath('userData'), 'yt-cookies.txt')
 }
@@ -49,6 +57,18 @@ async function doEnsure(onProgress?: (pct: number) => void): Promise<string> {
   if (await isInstalled()) return dest
 
   await fsp.mkdir(dirname(dest), { recursive: true })
+
+  // Prefer the bundled copy — instant, offline, no download.
+  const bundled = bundledYtDlpPath()
+  try {
+    await fsp.access(bundled)
+    await fsp.copyFile(bundled, dest)
+    onProgress?.(100)
+    return dest
+  } catch {
+    /* not bundled (e.g. dev build without a fetch) — download instead */
+  }
+
   const res = await net.fetch(YTDLP_URL) // follows GitHub's cross-host redirect
   if (!res.ok || !res.body) throw new Error(`yt-dlp download failed (HTTP ${res.status})`)
 
@@ -112,6 +132,23 @@ export async function updateYtDlp(): Promise<void> {
     })
   } catch {
     /* offline / locked — not fatal */
+  }
+}
+
+/** Run at app startup. If yt-dlp is already available (installed or bundled),
+ *  make sure the writable copy exists and check for updates at most once a day.
+ *  Does NOT trigger a download for users who've never used YouTube. */
+export async function initYtDlpAtStartup(): Promise<void> {
+  try {
+    if (!(await isInstalled())) {
+      // Only seed if we actually ship a bundled copy (no network otherwise).
+      await fsp.access(bundledYtDlpPath())
+      await ensureYtDlp()
+    }
+    const age = Date.now() - (await fsp.stat(ytdlpPath())).mtimeMs
+    if (age > 24 * 60 * 60 * 1000) void updateYtDlp() // stay current, throttled daily
+  } catch {
+    /* not installed and not bundled — downloads on first YouTube use */
   }
 }
 

@@ -269,6 +269,7 @@
     setFilter('')
     searchEl.focus()
   })
+  $('pl-downloads').addEventListener('click', () => ampwin.links.openDownloadsFolder())
 
   // Selection updates classes in place — never re-render on click, or the
   // second click of a double-click lands on a replaced DOM node and the

@@ -12,6 +12,11 @@ extraResources:
     to: bin/ffmpeg.exe
   - from: node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe
     to: bin/ffprobe.exe
+  # yt-dlp.exe is fetched into build/bin by scripts/fetch-ytdlp.mjs (run as part
+  # of `npm run dist`). If the fetch was skipped/offline, this copies only the
+  # .gitkeep and the app downloads yt-dlp at runtime instead.
+  - from: build/bin
+    to: bin
 win:
   target:
     - target: nsis

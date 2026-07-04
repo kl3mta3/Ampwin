@@ -85,6 +85,23 @@ ampwin.ready()
 
 **Import…** in the default skin accepts Butterchurn `.json` presets (thousands of converted MilkDrop presets circulate online). Raw `.milk` conversion is planned (the conversion toolchain is experimental).
 
+## Bundled binaries
+
+Release builds ship every external tool inside the app — end users install nothing:
+
+- **FFmpeg / ffprobe** (~139 MB) come from the `ffmpeg-static` / `ffprobe-static` npm
+  packages and are copied into `resources/bin/` at package time. Resolved from there
+  in the packaged app, or from `node_modules/` in dev.
+- **yt-dlp** (~17 MB) is fetched into `build/bin/` by `scripts/fetch-ytdlp.mjs` (run
+  automatically by `npm run dist`) and copied into `resources/bin/`. On first launch
+  the app seeds it into `%APPDATA%\Ampwin\bin\` (writable) — no download needed — and
+  self-updates that copy daily (`yt-dlp -U`), since YouTube changes break old versions.
+  FFmpeg is static and needs no updates.
+
+Building from source: `npm install` provides FFmpeg; `npm run dist` fetches yt-dlp
+automatically (best-effort — if offline, the app downloads yt-dlp at runtime on first
+YouTube use instead). The binaries themselves are gitignored, so the repo stays small.
+
 ## Architecture notes
 
 - The renderer keeps a persistent "app shell" (audio engine + Web Audio graph + visualizer host); skins live in a same-origin `srcdoc` iframe below it, which is why the music never stops when you switch skins.

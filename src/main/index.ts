@@ -56,6 +56,9 @@ if (!app.requestSingleInstanceLock()) {
     registerMediaKeys()
     // Non-blocking: clear orphaned .part files and evict LRU past the cap.
     void sweepCache(settings.cacheMaxBytes)
+    // Seed the bundled yt-dlp into userData and keep it current (no network for
+    // users who never touch YouTube).
+    void import('./ytdlp').then(({ initYtDlpAtStartup }) => initYtDlpAtStartup())
   })
 
   app.on('will-quit', () => {

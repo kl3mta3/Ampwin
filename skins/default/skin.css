@@ -288,6 +288,20 @@ input[type='range'] {
   visibility: visible;
 }
 
+#pl-downloads {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 0 4px;
+}
+
+#pl-downloads:hover {
+  color: var(--green);
+}
+
 #playlist {
   flex: 1;
   overflow-y: auto;
