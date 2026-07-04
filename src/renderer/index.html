@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Ampwin</title>
+    <!-- Skins load same-origin via srcdoc, so this CSP governs them too:
+         their scripts/styles/assets arrive over ampwin://
+         'unsafe-eval' is required by Butterchurn: MilkDrop presets are
+         equations compiled to JS at load time. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' ampwin:; script-src 'self' 'unsafe-inline' 'unsafe-eval' ampwin:; style-src 'self' 'unsafe-inline' ampwin:; img-src 'self' data: ampwin: https:; media-src 'self' ampwin: blob: https:; connect-src 'self' ampwin:; font-src 'self' ampwin:"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #000;
+      }
+      #skin-layer,
+      #overlay-layer {
+        position: absolute;
+        inset: 0;
+      }
+      #skin-layer iframe {
+        width: 100%;
+        height: 100%;
+        border: none;
+        display: block;
+      }
+      #overlay-layer {
+        pointer-events: none;
+      }
+      #host-layer {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="skin-layer"></div>
+    <div id="overlay-layer"></div>
+    <div id="host-layer"></div>
+    <script type="module" src="./src/shell.ts"></script>
+  </body>
+</html>

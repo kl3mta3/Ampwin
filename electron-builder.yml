@@ -1,0 +1,49 @@
+appId: com.ampwin.player
+productName: Ampwin
+directories:
+  output: dist-installer
+  buildResources: build
+files:
+  - out/**
+extraResources:
+  - from: skins
+    to: skins
+  - from: node_modules/ffmpeg-static/ffmpeg.exe
+    to: bin/ffmpeg.exe
+  - from: node_modules/ffprobe-static/bin/win32/x64/ffprobe.exe
+    to: bin/ffprobe.exe
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.png
+portable:
+  artifactName: ${productName}-${version}-portable.exe
+fileAssociations:
+  - ext: mp3
+    name: MP3 Audio
+  - ext: flac
+    name: FLAC Audio
+  - ext: ogg
+    name: Ogg Vorbis Audio
+  - ext: opus
+    name: Opus Audio
+  - ext: m4a
+    name: MPEG-4 Audio
+  - ext: wav
+    name: WAV Audio
+  - ext: wma
+    name: Windows Media Audio
+  - ext: m3u
+    name: M3U Playlist
+  - ext: m3u8
+    name: M3U8 Playlist
+  - ext: pls
+    name: PLS Playlist
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

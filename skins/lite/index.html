@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      * { margin: 0; box-sizing: border-box; user-select: none; }
+      html, body { width: 100%; height: 100%; overflow: hidden; }
+      body {
+        background: #101318;
+        color: #cfd4dd;
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 12px;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid #333;
+      }
+      #bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+      #title { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #6fd88f; }
+      button {
+        background: #1d222b; color: #cfd4dd; border: 1px solid #000;
+        border-radius: 3px; padding: 4px 10px; cursor: pointer; font-size: 13px;
+      }
+      button:hover { background: #2a3140; }
+      #seek, #vol { accent-color: #3fae66; }
+      #seek { width: 100%; }
+      #vol { width: 80px; }
+      #controls { display: flex; gap: 6px; padding: 4px 10px 10px; align-items: center; }
+      #time { font-family: Consolas, monospace; color: #6fd88f; font-size: 11px; margin-left: auto; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <span id="title">Ampwin Lite</span>
+      <button id="x">×</button>
+    </div>
+    <div id="controls">
+      <button id="prev">⏮</button>
+      <button id="play">▶</button>
+      <button id="next">⏭</button>
+      <span title="Volume">🔊</span>
+      <input id="vol" type="range" min="0" max="100" value="80" title="Volume" />
+      <button id="playlist">playlist</button>
+      <button id="back">skin: classic</button>
+      <span id="time">0:00</span>
+    </div>
+    <div style="padding: 0 10px 10px"><input id="seek" type="range" min="0" max="1000" value="0" /></div>
+
+    <script>
+      // Minimal skin: the whole player in ~30 lines of API calls.
+      const $ = (id) => document.getElementById(id)
+      const fmt = (s) => (isFinite(s) && s > 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00')
+
+      ampwin.window.setDragRegion($('bar'), { exclude: [$('x')] })
+      $('x').onclick = () => ampwin.window.close()
+      $('prev').onclick = () => ampwin.player.previous()
+      $('play').onclick = () => ampwin.player.togglePlay()
+      $('next').onclick = () => ampwin.player.next()
+      $('playlist').onclick = () => ampwin.playlist.popOut()
+      $('back').onclick = () => ampwin.skins.setActive('default')
+      $('seek').onchange = () => {
+        const d = ampwin.player.getSnapshot().durationSec
+        if (d > 0) ampwin.player.seek(($('seek').value / 1000) * d)
+      }
+      $('vol').oninput = () => ampwin.player.setVolume($('vol').value / 100)
+
+      ampwin.player.on('track', (t) => {
+        $('title').textContent = t ? (t.artist ? t.artist + ' — ' : '') + t.title : 'Ampwin Lite'
+      })
+      ampwin.player.on('state', (s) => ($('play').textContent = s === 'playing' ? '⏸' : '▶'))
+      ampwin.player.on('position', (pos, dur) => {
+        $('time').textContent = fmt(pos) + ' / ' + fmt(dur)
+        if (dur > 0) $('seek').value = Math.round((pos / dur) * 1000)
+      })
+      ampwin.player.on('volume', (v) => ($('vol').value = Math.round(v * 100)))
+
+      const snap = ampwin.player.getSnapshot()
+      if (snap.track) $('title').textContent = (snap.track.artist ? snap.track.artist + ' — ' : '') + snap.track.title
+      $('vol').value = Math.round(snap.volume * 100)
+      ampwin.ready()
+    </script>
+  </body>
+</html>

@@ -1,0 +1,30 @@
+{
+  "name": "ampwin",
+  "version": "0.1.0",
+  "description": "Winamp-style media player with a MilkDrop-class visualizer, HTML/CSS/JS skins, and FFmpeg-backed format support",
+  "main": "./out/main/index.js",
+  "author": "Kenny",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "test": "vitest run",
+    "dist": "electron-vite build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "butterchurn": "2.6.7",
+    "butterchurn-presets": "2.4.7",
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^4.0.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "music-metadata": "^11.0.0",
+    "typescript": "^5.5.0",
+    "vite": "^7.0.0",
+    "vitest": "^3.0.0"
+  }
+}

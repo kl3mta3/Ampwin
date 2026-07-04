@@ -1,0 +1,50 @@
+# ---- dependencies ----
+# (ffmpeg-static / ffprobe-static binaries live here; re-fetched by npm install)
+node_modules/
+
+# ---- build output ----
+# out/ = electron-vite build, dist-installer/ = installer + portable + win-unpacked
+out/
+dist/
+dist-installer/
+*.tsbuildinfo
+.vite/
+
+# ---- test / coverage ----
+coverage/
+# generated test media (keep only the generator script)
+test-media/*
+!test-media/generate.ps1
+
+# ---- runtime data ----
+# Lives in %APPDATA%\Ampwin, never in the repo. Anchored to root so these only
+# catch a stray copy, not real config deeper in the tree.
+/downloads/
+/transcode-cache/
+/session.json
+/settings.json
+/yt-cookies.txt
+**/yt-dlp.exe
+
+# ---- logs ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- editors / OS junk ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# NOTE: build/ (app icon), package-lock.json, skins/, and src/ are intentionally
+# committed — do not add them here.

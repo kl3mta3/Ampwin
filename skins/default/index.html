@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="skin.css" />
+  </head>
+  <body>
+    <div id="root">
+      <!-- title bar (window drag handle; buttons excluded) -->
+      <header id="titlebar">
+        <div id="logo">AMPWIN</div>
+        <div id="title-scroll"><span id="title-text">welcome</span></div>
+        <button id="btn-min" title="Minimize">–</button>
+        <button id="btn-close" title="Close">×</button>
+      </header>
+
+      <!-- visualizer + track info -->
+      <section id="main">
+        <div id="viz-pane">
+          <canvas id="viz" title="click: random preset · double-click: fullscreen"></canvas>
+        </div>
+        <div id="info-pane">
+          <img id="art" alt="" hidden />
+          <div id="track-title">no track</div>
+          <div id="track-artist"></div>
+          <div id="track-album"></div>
+          <div id="track-tech"></div>
+        </div>
+      </section>
+
+      <!-- transport -->
+      <section id="transport">
+        <div class="row">
+          <button id="btn-prev" title="Previous">⏮</button>
+          <button id="btn-play" title="Play/Pause">▶</button>
+          <button id="btn-stop" title="Stop">⏹</button>
+          <button id="btn-next" title="Next">⏭</button>
+          <span id="time-pos" class="lcd">0:00</span>
+          <input id="seek" type="range" min="0" max="1000" value="0" />
+          <span id="time-dur" class="lcd">0:00</span>
+        </div>
+        <div class="row">
+          <button id="btn-shuffle" title="Shuffle">🔀</button>
+          <button id="btn-repeat" title="Repeat">🔁<sub id="repeat-mode"></sub></button>
+          <button id="btn-mute" title="Mute">🔊</button>
+          <input id="vol" type="range" min="0" max="100" value="80" title="Volume" />
+          <span class="spacer"></span>
+          <select id="sel-viz" title="Visualizer"></select>
+          <select id="sel-skin" title="Skin"></select>
+        </div>
+        <div class="row">
+          <select id="sel-preset" title="MilkDrop preset"></select>
+          <button id="btn-preset-rand" title="Random preset">🎲</button>
+          <button id="btn-preset-cycle" title="Auto-cycle presets">cycle</button>
+          <button id="btn-preset-import" title="Import Butterchurn .json presets">import…</button>
+          <span class="spacer"></span>
+          <button id="btn-pl-popout" title="Pop out playlist to a window">⇱ playlist</button>
+          <button id="btn-fullscreen" title="Fullscreen visualizer">⛶</button>
+        </div>
+      </section>
+
+      <!-- playlist -->
+      <section id="playlist-pane">
+        <div id="pl-search-bar">
+          <input id="pl-search" type="text" placeholder="🔍 filter playlist…" />
+          <button id="pl-search-clear" title="Clear filter">×</button>
+        </div>
+        <div id="playlist"></div>
+        <div id="playlist-actions">
+          <button id="btn-add-files">+ files</button>
+          <button id="btn-add-folder">+ folder</button>
+          <button id="btn-add-link" title="Add a URL or search YouTube">+ link</button>
+          <button id="btn-remove">remove</button>
+          <button id="btn-clear">clear</button>
+          <span class="spacer"></span>
+          <button id="btn-import" title="Import .m3u/.m3u8/.pls">import</button>
+          <button id="btn-export" title="Export as .m3u8">export</button>
+          <button id="btn-save">save</button>
+          <select id="sel-saved" title="Saved playlists">
+            <option value="">load…</option>
+          </select>
+        </div>
+      </section>
+    </div>
+
+    <!-- save-playlist inline prompt (window.prompt doesn't exist in Electron) -->
+    <div id="save-modal" class="modal" hidden>
+      <div class="modal-box">
+        <div class="modal-title">Save playlist as</div>
+        <input id="save-name" type="text" maxlength="60" placeholder="playlist name" />
+        <div class="modal-actions">
+          <button id="save-ok">save</button>
+          <button id="save-cancel">cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- add-link modal -->
+    <div id="link-modal" class="modal" hidden>
+      <div class="modal-box" style="width: 380px">
+        <div class="modal-title">Add link</div>
+        <input id="link-url" type="text" placeholder="Paste a URL (YouTube, direct .mp3/.mp4, stream…)" />
+        <label class="chk"><input id="link-audio" type="checkbox" /> Audio only</label>
+        <div id="link-status"></div>
+        <div class="modal-actions">
+          <button id="link-search-btn" title="Search YouTube">🔍 search</button>
+          <button id="link-signin-btn" title="Sign in to YouTube for age/region-locked videos">sign in</button>
+          <span class="spacer"></span>
+          <button id="link-add">add</button>
+          <button id="link-cancel">cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- YouTube search modal -->
+    <div id="search-modal" class="modal" hidden>
+      <div class="modal-box" style="width: 560px; max-height: 80%">
+        <div class="modal-title">Search YouTube</div>
+        <div class="row">
+          <input id="search-q" type="text" placeholder="Search…" style="flex: 1" />
+          <label class="chk"><input id="search-audio" type="checkbox" /> audio only</label>
+          <button id="search-go">go</button>
+        </div>
+        <div id="search-results"></div>
+        <div class="modal-actions">
+          <span id="search-status" class="spacer"></span>
+          <button id="search-close">close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="skin.js"></script>
+  </body>
+</html>

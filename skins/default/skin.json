@@ -1,0 +1,16 @@
+{
+  "id": "default",
+  "name": "Ampwin Classic",
+  "author": "Ampwin",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "entry": "index.html",
+  "window": {
+    "width": 680,
+    "height": 560,
+    "minWidth": 520,
+    "minHeight": 420,
+    "resizable": true
+  },
+  "features": ["visualizer", "playlist"]
+}
