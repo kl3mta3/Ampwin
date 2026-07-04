@@ -7,12 +7,15 @@ import { native } from './native'
 import type { PlayerController } from './playlist/controller'
 import type { SkinManager } from './skin/skinHost'
 import type { VisualizerHost } from './viz/host'
+import type { SystemAudioCapture } from './audio/systemAudio'
+import type { VisualizerPlugin } from './viz/plugin'
 
 export async function runSelfTest(
   path: string,
   controller: PlayerController,
   skinManager: SkinManager,
-  vizHost: VisualizerHost
+  vizHost: VisualizerHost,
+  systemAudio?: SystemAudioCapture
 ): Promise<void> {
   const results: string[] = []
   let failed = false
@@ -25,6 +28,14 @@ export async function runSelfTest(
   // AMPWIN_SELFTEST=youtube → exercise the link/yt-dlp path against live YouTube.
   if (path === 'youtube') {
     await runYtTest(controller, check)
+    await finish()
+    return
+  }
+
+  // AMPWIN_SELFTEST=addons → verify a pre-seeded+enabled addon loaded, registered
+  // a visualizer, renders, and survives a skin switch (addon-owned lifetime).
+  if (path === 'addons') {
+    await runAddonLoadTest(skinManager, vizHost, check)
     await finish()
     return
   }
@@ -133,6 +144,19 @@ export async function runSelfTest(
         controller.getSnapshot().state === 'idle' && vizHost.getDebugInfo().mode === 'viz',
         `state=${controller.getSnapshot().state} mode=${vizHost.getDebugInfo().mode}`
       )
+
+      // convert: extract audio (mp3) and re-encode video (mkv)
+      const vt = controller.model.getTracks().find((t) => t.isVideo && !t.isRemote)
+      if (vt) {
+        const mp3 = await controller.convertTrack(vt, 'mp3')
+        check('convert video → audio-only mp3', typeof mp3 === 'string' && /\.mp3$/i.test(mp3!), mp3 ?? 'null')
+        const mkv = await controller.convertTrack(vt, 'mkv')
+        check('convert video → mkv', typeof mkv === 'string' && /\.mkv$/i.test(mkv!), mkv ?? 'null')
+        if (mkv) {
+          const [p] = await native.invoke('media:probe', [mkv])
+          check('converted video is valid', p.ok && p.durationSec > 0, `codec=${p.codec} dur=${p.durationSec.toFixed(1)}s`)
+        }
+      }
 
       await finish()
       return
@@ -353,6 +377,70 @@ export async function runSelfTest(
       importedName === 'selftest-export' && controller.model.size() === beforeTracks.length,
       `name=${importedName} size=${controller.model.size()}`
     )
+
+    // ---- convert (right-click ▸ Convert) -------------------------------------
+    const formats = await native.invoke('convert:list', false)
+    check('convert offers audio formats', formats.length >= 5 && formats.some((f) => f.id === 'flac'))
+    const srcTrack = controller.model.getTracks().find((t) => !t.isRemote && !t.missing)
+    if (srcTrack) {
+      const outPath = await controller.convertTrack(srcTrack, 'flac')
+      check(
+        'convert to FLAC saves a file',
+        typeof outPath === 'string' && /Converted[\\/].+\.flac$/i.test(outPath!),
+        outPath ?? 'null'
+      )
+      if (outPath) {
+        const [probed] = await native.invoke('media:probe', [outPath])
+        check(
+          'converted file is valid',
+          probed.ok && probed.durationSec > 0 && /flac/i.test(probed.codec),
+          `codec=${probed.codec} dur=${probed.durationSec.toFixed(1)}s`
+        )
+      }
+    }
+
+    // ---- addon framework -----------------------------------------------------
+    // Addon-owned visualizer plugins list like built-ins but are removed by
+    // addon teardown (not skin teardown), and built-ins survive.
+    const stub: VisualizerPlugin = {
+      id: 'selftest-addon-viz',
+      name: 'Self-test Addon Viz',
+      init: () => {},
+      render: () => {},
+      resize: () => {},
+      destroy: () => {}
+    }
+    vizHost.registry.register(stub, 'addon:selftest')
+    check(
+      'addon plugin registers + lists',
+      vizHost.listVisualizers().some((v) => v.id === 'selftest-addon-viz')
+    )
+    const removed = vizHost.registry.removeAddonOwned('selftest')
+    check(
+      'addon teardown removes only its plugins',
+      removed.includes('selftest-addon-viz') &&
+        !vizHost.listVisualizers().some((v) => v.id === 'selftest-addon-viz') &&
+        vizHost.listVisualizers().some((v) => v.id === 'butterchurn'),
+      `removed=[${removed.join(',')}]`
+    )
+
+    const installedAddons = await native.invoke('addons:list')
+    check('addons:list returns an array', Array.isArray(installedAddons))
+    const catalog = await native.invoke('addons:catalog')
+    check(
+      'addons:catalog returns a shape (repo may be offline)',
+      Array.isArray(catalog.addons),
+      catalog.catalogError ? `catalogError: ${catalog.catalogError}` : `${catalog.addons.length} listed`
+    )
+
+    // ---- system-audio mode ---------------------------------------------------
+    // We can't drive real loopback here (needs another app playing + a gesture),
+    // but the state machine must start clean and tolerate a redundant disable.
+    if (systemAudio) {
+      check('system audio starts disabled', systemAudio.isEnabled() === false)
+      systemAudio.disable()
+      check('system audio disable() is a safe no-op when off', systemAudio.isEnabled() === false)
+    }
   } catch (err) {
     failed = true
     results.push(`FAIL  self-test threw: ${(err as Error).message}`)
@@ -371,6 +459,44 @@ export async function runSelfTest(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+async function runAddonLoadTest(
+  skinManager: SkinManager,
+  vizHost: VisualizerHost,
+  check: (name: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+  try {
+    // The addon was loaded at boot (addonHost.boot); give its iframe script a
+    // moment to run window.ampwin.visualizer.registerPlugin().
+    await sleep(600)
+    const listed = vizHost.listVisualizers().map((v) => v.id)
+    check('addon visualizer registered from iframe', listed.includes('oscilloscope'), listed.join(','))
+
+    if (listed.includes('oscilloscope')) {
+      await vizHost.setActiveVisualizer('oscilloscope')
+      await sleep(500)
+      check(
+        'oscilloscope active on a 2D canvas',
+        vizHost.getActiveVisualizerId() === 'oscilloscope' && vizHost.debugCanvasContext() === '2d',
+        `context=${vizHost.debugCanvasContext()}`
+      )
+      const f = vizHost.getDebugInfo().frameCount
+      await sleep(500)
+      check('oscilloscope render loop advancing', vizHost.getDebugInfo().frameCount > f + 5)
+
+      // Addon-owned plugins outlive skin switches (unlike skin-owned ones).
+      await skinManager.setActive('lite')
+      await sleep(400)
+      check(
+        'addon visualizer survives a skin switch',
+        vizHost.listVisualizers().some((v) => v.id === 'oscilloscope')
+      )
+      await skinManager.setActive('default')
+    }
+  } catch (err) {
+    check('addon load test threw', false, (err as Error).message)
+  }
 }
 
 async function runYtTest(

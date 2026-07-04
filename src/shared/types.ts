@@ -118,6 +118,38 @@ export interface SkinInfo {
   source: 'bundled' | 'user'
 }
 
+// ---- addons ----------------------------------------------------------------
+// An addon is a folder (addon.json manifest + JS) distributed from a GitHub
+// repo. Installed addons live in userData/addons/<id>/ and, when enabled, load
+// into a hidden iframe with the full window.ampwin API (like a skin).
+
+/** An addon as listed in a repo's index.json. */
+export interface AddonCatalogEntry {
+  id: string
+  name: string
+  version: string
+  description: string
+  author: string
+  /** Entry JS file, relative to the addon folder (default 'main.js'). */
+  entry?: string
+  /** Files to download when installing (relative paths), e.g. ['addon.json','main.js']. */
+  files: string[]
+}
+
+/** Merged view for the Addons UI + the boot-time loader. */
+export interface AddonInfo {
+  id: string
+  name: string
+  version: string
+  description: string
+  author: string
+  entry: string
+  installed: boolean
+  enabled: boolean
+  /** Newer version available in the repo than the installed one. */
+  updateAvailable?: boolean
+}
+
 export interface PresetInfo {
   id: string
   name: string
@@ -143,6 +175,10 @@ export interface Settings {
   cacheMaxBytes: number
   /** Crash-loop guard: forced back to default skin after 2 boot crashes. */
   bootFailures: number
+  /** Ids of installed addons the user has turned on (loaded at boot). */
+  enabledAddonIds: string[]
+  /** GitHub repo the Addons browser installs from. */
+  addonRepoUrl: string
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -157,7 +193,9 @@ export const DEFAULT_SETTINGS: Settings = {
   windowBounds: null,
   // Video conversions are multi-GB; a small cap would thrash them out.
   cacheMaxBytes: 8 * 1024 * 1024 * 1024,
-  bootFailures: 0
+  bootFailures: 0,
+  enabledAddonIds: [],
+  addonRepoUrl: 'https://github.com/kl3mta3/Ampwin-Addons'
 }
 
 /** Auto-saved session: current playlist + position, restored on launch. */

@@ -6,9 +6,13 @@
 
 import type { AmpwinApi } from '../../../shared/skin-api'
 import { native } from '../native'
-import { buildFacade, type FacadeDeps, type SkinFacade } from './ampwinApi'
+import { buildFacade, type AddonOps, type FacadeDeps, type SkinFacade, type SkinOps } from './ampwinApi'
 
 const READY_TIMEOUT_MS = 5000
+
+/** Everything a skin facade needs except the ops that reference the managers
+ *  themselves (wired after construction to break the skin↔addon cycle). */
+export type BaseFacadeDeps = Omit<FacadeDeps, 'skinOps' | 'addonOps'>
 
 declare global {
   interface Window {
@@ -18,13 +22,27 @@ declare global {
 }
 
 export class SkinManager {
-  private baseDeps: Omit<FacadeDeps, 'skinOps'>
+  private baseDeps: BaseFacadeDeps
+  private addonOps: AddonOps | null = null
   private activeId = 'default'
   private current: { facade: SkinFacade; iframe: HTMLIFrameElement } | null = null
   private switching = false
 
-  constructor(baseDeps: Omit<FacadeDeps, 'skinOps'>) {
+  constructor(baseDeps: BaseFacadeDeps) {
     this.baseDeps = baseDeps
+  }
+
+  /** Skin-management ops the facade exposes as ampwin.skins.*; also handed to
+   *  the AddonHost so addons can switch skins too. */
+  readonly ops: SkinOps = {
+    list: () => native.invoke('skins:list'),
+    getActiveId: () => this.activeId,
+    setActive: (id) => this.setActive(id)
+  }
+
+  /** Wired by the shell after the AddonHost exists (skins can manage addons). */
+  setAddonOps(ops: AddonOps): void {
+    this.addonOps = ops
   }
 
   getActiveId(): string {
@@ -113,10 +131,10 @@ export class SkinManager {
         holder.facade = buildFacade(
           {
             ...this.baseDeps,
-            skinOps: {
-              list: () => native.invoke('skins:list'),
-              getActiveId: () => this.activeId,
-              setActive: (nextId) => this.setActive(nextId)
+            skinOps: this.ops,
+            addonOps: this.addonOps ?? {
+              setEnabled: () => Promise.resolve(),
+              uninstall: () => Promise.resolve()
             }
           },
           () => {

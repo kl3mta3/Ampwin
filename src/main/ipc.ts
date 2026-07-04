@@ -1,5 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { promises as fsp } from 'fs'
+import { existsSync, promises as fsp } from 'fs'
 import { basename, dirname, extname, join } from 'path'
 import type { DialogFilterKind, FileFilter, IpcInvokeMap } from '../shared/ipc'
 import {
@@ -30,7 +30,16 @@ import {
 } from './ytdlp'
 import { isSignedIn, openSignIn, signOut } from './youtubeAuth'
 import { getMainWindow } from './windows'
+import { convertFile, convertFormats, convertedDir } from './convert'
 import { listSkins, openUserSkinsFolder, readSkinEntry } from './skins'
+import {
+  browseAddons,
+  installAddon,
+  listInstalled,
+  openAddonsFolder,
+  setAddonEnabled,
+  uninstallAddon
+} from './addons'
 import { importPresetFiles, listUserPresets, readUserPreset } from './presets'
 import { parseM3u, parsePls, serializeM3u } from './playlistFormats'
 import { minimizePopout } from './windows'
@@ -276,6 +285,17 @@ export function registerIpcHandlers(): void {
   handle('presets:read', (_event, id) => readUserPreset(id))
   handle('presets:import-files', (_event, paths) => importPresetFiles(paths))
 
+  handle('addons:list', () => listInstalled())
+  handle('addons:catalog', () => browseAddons())
+  handle('addons:install', (event, id) =>
+    installAddon(id, (percent) => {
+      if (!event.sender.isDestroyed()) event.sender.send('evt:addon-progress', { id, percent })
+    })
+  )
+  handle('addons:uninstall', (_event, id) => uninstallAddon(id))
+  handle('addons:set-enabled', (_event, id, enabled) => setAddonEnabled(id, enabled))
+  handle('addons:open-folder', () => openAddonsFolder())
+
   handle('window:apply-skin-spec', (event, spec, includeSize) => {
     const win = windowOf(event)
     if (!win) return
@@ -352,6 +372,31 @@ export function registerIpcHandlers(): void {
   handle('downloads:open-folder', async () => {
     await fsp.mkdir(downloadsDir(), { recursive: true })
     await shell.openPath(downloadsDir())
+  })
+
+  handle('convert:list', (_event, isVideo) => convertFormats(isVideo))
+
+  let lastConvertedPath: string | null = null
+  handle('convert:start', async (event, srcPath, formatId) => {
+    const path = await convertFile(srcPath, formatId, (percent) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('evt:convert-progress', { srcPath, percent })
+      }
+    })
+    lastConvertedPath = path
+    return { path }
+  })
+
+  handle('convert:open-folder', async () => {
+    // Highlight the newest result when we have one: showItemInFolder always
+    // opens a live Explorer view, whereas openPath can re-focus a stale
+    // window Windows already has for that folder.
+    if (lastConvertedPath && existsSync(lastConvertedPath)) {
+      shell.showItemInFolder(lastConvertedPath)
+      return
+    }
+    await fsp.mkdir(convertedDir(), { recursive: true })
+    await shell.openPath(convertedDir())
   })
   handle('yt:signin', () => openSignIn(getMainWindow()))
   handle('yt:signed-in', () => isSignedIn())

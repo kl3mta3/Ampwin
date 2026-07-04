@@ -3,6 +3,7 @@
 // handlers against it; IpcEventMap covers main -> renderer pushes.
 
 import type {
+  AddonInfo,
   ImportedPlaylist,
   LinkProbe,
   Playlist,
@@ -64,6 +65,17 @@ export interface IpcInvokeMap {
   'presets:read': { args: [id: string]; result: unknown }
   'presets:import-files': { args: [paths: string[]]; result: PresetInfo[] }
 
+  // ---- addons --------------------------------------------------------------
+  /** Installed addons only (no network) — the boot loader reads this. */
+  'addons:list': { args: []; result: AddonInfo[] }
+  /** Merged repo catalog + installed state for the Addons browser. */
+  'addons:catalog': { args: []; result: { addons: AddonInfo[]; catalogError?: string } }
+  /** Download + install an addon by id; emits evt:addon-progress. */
+  'addons:install': { args: [id: string]; result: AddonInfo }
+  'addons:uninstall': { args: [id: string]; result: void }
+  'addons:set-enabled': { args: [id: string, enabled: boolean]; result: void }
+  'addons:open-folder': { args: []; result: void }
+
   /** Constrain (and optionally resize) the window per the incoming skin's
    *  manifest. includeSize=false on boot so restored bounds win. */
   'window:apply-skin-spec': { args: [spec: SkinWindowSpec, includeSize: boolean]; result: void }
@@ -109,6 +121,12 @@ export interface IpcInvokeMap {
     result: { path: string }
   }
   'downloads:open-folder': { args: []; result: void }
+
+  // ---- convert (right-click a local file) ----------------------------------
+  'convert:list': { args: [isVideo: boolean]; result: { id: string; label: string }[] }
+  /** Convert a local file to a format; emits evt:convert-progress. */
+  'convert:start': { args: [srcPath: string, formatId: string]; result: { path: string } }
+  'convert:open-folder': { args: []; result: void }
   /** Open a YouTube sign-in window; resolves signed-in state on close. */
   'yt:signin': { args: []; result: { signedIn: boolean } }
   'yt:signed-in': { args: []; result: boolean }
@@ -129,6 +147,8 @@ export interface IpcEventMap {
   'evt:vstream-error': { sessionId: number; message: string }
   'evt:ytdlp-progress': { percent: number }
   'evt:download-progress': { url: string; percent: number; phase: string }
+  'evt:convert-progress': { srcPath: string; percent: number }
+  'evt:addon-progress': { id: string; percent: number }
 }
 
 export type InvokeChannel = keyof IpcInvokeMap

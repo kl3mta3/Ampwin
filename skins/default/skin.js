@@ -395,6 +395,11 @@
         ]
       })
     }
+    // Convert applies to a single local file (not a remote link).
+    const t = tracks[i]
+    if (t && !t.isRemote && !t.missing && !t.unreadable) {
+      menu.push({ label: '🔄 Convert…', action: () => openConvert(t) })
+    }
     menu.push({
       label: many ? `✕ Remove ${selected.size} tracks` : '✕ Remove from list',
       action: () => {
@@ -435,6 +440,61 @@
       ampwin.playlist.removeIndices([...selected])
       selected.clear()
     }
+  })
+
+  // ---- convert -----------------------------------------------------------------
+
+  let convertTarget = null
+  let converting = false
+
+  async function openConvert(trk) {
+    if (converting) return
+    convertTarget = trk
+    $('convert-title').textContent = 'Convert: ' + trk.title
+    $('convert-pick').hidden = false
+    $('convert-bar').hidden = true
+    $('convert-fill').style.width = '0%'
+    $('convert-go').hidden = false
+    $('convert-open').hidden = true
+    $('convert-cancel').textContent = 'cancel'
+    $('convert-status').textContent = ''
+    const sel = $('convert-format')
+    sel.textContent = ''
+    for (const f of await ampwin.convert.list(trk.isVideo)) {
+      const o = document.createElement('option')
+      o.value = f.id
+      o.textContent = f.label
+      sel.appendChild(o)
+    }
+    $('convert-modal').hidden = false
+  }
+
+  $('convert-cancel').addEventListener('click', () => ($('convert-modal').hidden = true))
+  $('convert-open').addEventListener('click', () => ampwin.convert.openFolder())
+
+  $('convert-go').addEventListener('click', async () => {
+    if (converting || !convertTarget) return
+    converting = true
+    const fmt = $('convert-format').value
+    $('convert-pick').hidden = true
+    $('convert-go').hidden = true
+    $('convert-bar').hidden = false
+    $('convert-status').textContent = 'converting…'
+    const off = ampwin.convert.on('progress', (pct) => {
+      $('convert-fill').style.width = pct + '%'
+      $('convert-status').textContent = 'converting… ' + pct + '%'
+    })
+    const path = await ampwin.convert.start(convertTarget, fmt)
+    off()
+    converting = false
+    if (path) {
+      $('convert-fill').style.width = '100%'
+      $('convert-status').textContent = '✓ saved to Downloads\\Converted'
+      $('convert-open').hidden = false
+    } else {
+      $('convert-status').textContent = '⚠ conversion failed'
+    }
+    $('convert-cancel').textContent = 'close'
   })
 
   ampwin.playlist.on('changed', (tracks, currentIndex) => {
@@ -664,6 +724,23 @@
   $('btn-fullscreen').addEventListener('click', () => ampwin.visualizer.setFullscreen(true))
   $('btn-pl-popout').addEventListener('click', () => ampwin.playlist.popOut())
 
+  // System-audio mode: visualize whatever the whole computer is playing.
+  const sysBtn = $('btn-sysaudio')
+  sysBtn.addEventListener('click', async () => {
+    try {
+      await ampwin.system.toggle()
+    } catch (err) {
+      $('title-text').textContent = '⚠ system audio: ' + (err.message || err)
+    }
+  })
+  ampwin.system.on('change', (on) => {
+    sysBtn.classList.toggle('on', on)
+    sysBtn.title = on
+      ? 'System audio ON — visualizing everything the computer plays. Click to stop.'
+      : 'Visualize system audio — Spotify, a browser, any app'
+  })
+  sysBtn.classList.toggle('on', ampwin.system.isEnabled())
+
   const vizSel = $('sel-viz')
   function refreshVisualizers() {
     vizSel.textContent = ''
@@ -675,6 +752,8 @@
       vizSel.appendChild(opt)
     }
   }
+  // Refresh on open so addon-provided visualizers show up after they register.
+  vizSel.addEventListener('mousedown', refreshVisualizers)
   vizSel.addEventListener('change', () => ampwin.visualizer.setActiveVisualizer(vizSel.value))
 
   // presets — the catalog loads async, so refresh again when the first
@@ -730,6 +809,139 @@
     }
   }
   skinSel.addEventListener('change', () => ampwin.skins.setActive(skinSel.value))
+
+  // ---- addons ------------------------------------------------------------------------
+
+  const addonsList = $('addons-list')
+  let addonsCache = []
+  let addonsFilter = ''
+
+  function renderAddons() {
+    addonsList.textContent = ''
+    const q = addonsFilter.toLowerCase()
+    const items = addonsCache.filter(
+      (a) => !q || (a.name + ' ' + a.description + ' ' + a.author).toLowerCase().includes(q)
+    )
+    if (items.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'addon-empty'
+      empty.textContent = addonsCache.length ? 'no matches' : 'no addons found'
+      addonsList.appendChild(empty)
+      return
+    }
+    for (const a of items) {
+      const row = document.createElement('div')
+      row.className = 'addon-row'
+
+      const meta = document.createElement('div')
+      meta.className = 'addon-meta'
+      const title = document.createElement('div')
+      title.className = 'addon-title'
+      title.textContent = a.name + ' '
+      const ver = document.createElement('span')
+      ver.className = 'addon-ver'
+      ver.textContent = 'v' + a.version + (a.author ? ' · ' + a.author : '')
+      title.appendChild(ver)
+      const desc = document.createElement('div')
+      desc.className = 'addon-desc'
+      desc.textContent = a.description
+      meta.append(title, desc)
+
+      const actions = document.createElement('div')
+      actions.className = 'addon-actions'
+      if (!a.installed) {
+        const btn = document.createElement('button')
+        btn.textContent = 'install'
+        btn.addEventListener('click', () => installAddon(a, btn))
+        actions.appendChild(btn)
+      } else {
+        const toggle = document.createElement('button')
+        toggle.textContent = a.enabled ? 'enabled' : 'disabled'
+        toggle.classList.toggle('on', a.enabled)
+        toggle.addEventListener('click', async () => {
+          toggle.disabled = true
+          await ampwin.addons.setEnabled(a.id, !a.enabled)
+          a.enabled = !a.enabled
+          renderAddons()
+          refreshVisualizers()
+        })
+        actions.appendChild(toggle)
+        if (a.updateAvailable) {
+          const up = document.createElement('button')
+          up.textContent = 'update'
+          up.addEventListener('click', () => installAddon(a, up))
+          actions.appendChild(up)
+        }
+        const rm = document.createElement('button')
+        rm.textContent = 'uninstall'
+        rm.addEventListener('click', async () => {
+          await ampwin.addons.uninstall(a.id)
+          a.installed = false
+          a.enabled = false
+          renderAddons()
+          refreshVisualizers()
+        })
+        actions.appendChild(rm)
+      }
+      row.append(meta, actions)
+      addonsList.appendChild(row)
+    }
+  }
+
+  async function installAddon(a, btn) {
+    btn.disabled = true
+    const label = btn.textContent
+    const off = ampwin.addons.on('progress', (id, pct) => {
+      if (id === a.id) btn.textContent = pct + '%'
+    })
+    try {
+      await ampwin.addons.install(a.id)
+      a.installed = true
+      await ampwin.addons.setEnabled(a.id, true) // auto-enable freshly installed
+      a.enabled = true
+      a.updateAvailable = false
+      $('addons-status').textContent = '✓ installed ' + a.name
+    } catch (err) {
+      $('addons-status').textContent = '⚠ ' + (err.message || err)
+      btn.textContent = label
+      btn.disabled = false
+    }
+    off()
+    renderAddons()
+    refreshVisualizers()
+  }
+
+  async function loadAddons() {
+    $('addons-status').textContent = 'loading…'
+    try {
+      const { addons, catalogError } = await ampwin.addons.catalog()
+      addonsCache = addons
+      $('addons-status').textContent = catalogError
+        ? 'repo offline — showing installed only'
+        : addons.length + ' addon' + (addons.length === 1 ? '' : 's')
+    } catch (err) {
+      addonsCache = await ampwin.addons.list()
+      $('addons-status').textContent = 'repo unavailable: ' + (err.message || err)
+    }
+    renderAddons()
+  }
+
+  $('btn-addons').addEventListener('click', () => {
+    $('addons-filter').value = ''
+    addonsFilter = ''
+    addonsCache = []
+    addonsList.textContent = ''
+    $('addons-status').textContent = ''
+    $('addons-modal').hidden = false
+    loadAddons()
+  })
+  $('addons-close').addEventListener('click', () => ($('addons-modal').hidden = true))
+  $('addons-refresh').addEventListener('click', loadAddons)
+  $('addons-folder').addEventListener('click', () => ampwin.addons.openFolder())
+  $('addons-filter').addEventListener('input', () => {
+    addonsFilter = $('addons-filter').value.trim()
+    renderAddons()
+  })
 
   // ---- keyboard ---------------------------------------------------------------------
 

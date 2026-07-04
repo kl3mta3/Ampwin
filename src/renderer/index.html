@@ -35,7 +35,8 @@
       #overlay-layer {
         pointer-events: none;
       }
-      #host-layer {
+      #host-layer,
+      #addon-layer {
         display: none;
       }
     </style>
@@ -44,6 +45,8 @@
     <div id="skin-layer"></div>
     <div id="overlay-layer"></div>
     <div id="host-layer"></div>
+    <!-- Enabled addons load here as hidden iframes (headless, full ampwin API). -->
+    <div id="addon-layer"></div>
     <script type="module" src="./src/shell.ts"></script>
   </body>
 </html>

@@ -3,17 +3,28 @@
 //   audioElA ─ MediaElementSourceA ─┐
 //                                   ├─→ mixerGain ─→ masterGain ─→ destination
 //   audioElB ─ MediaElementSourceB ─┘      │
-//                                          └─→ analyser (tap for skins/plugins)
+//                                          └─→ vizSource ─→ analyser (skins/plugins)
 //
-// Butterchurn later connects to mixerGain and builds its own analyser.
+// vizSource is a stable node the visualizer + analyser read from. Its INPUT is
+// swappable: normally mixerGain (the app's own playback), but "System audio"
+// mode disconnects mixerGain and feeds a WASAPI loopback stream in instead, so
+// the visualizer reacts to whatever the whole system is playing. vizSource is
+// NEVER connected to masterGain/destination — feeding a loopback capture back
+// to the speakers would echo. Butterchurn connects its own analyser to
+// vizSource; because that node is stable, swapping its upstream input is
+// transparent and needs no plugin re-init.
+//
 // MediaElementSourceNode is once-per-element, so the two <audio> elements are
 // created here and reused forever by swapping src.
 
 export interface AudioGraph {
   ctx: AudioContext
-  /** Pre-volume mix point — visualizers tap here so volume doesn't affect them. */
+  /** Pre-volume mix point for the app's own playback. */
   mixerGain: GainNode
   masterGain: GainNode
+  /** Stable node the visualizer + analyser read from; its input is swappable
+   *  (own playback ↔ system loopback) without touching downstream consumers. */
+  vizSource: GainNode
   analyser: AnalyserNode
   elements: [HTMLAudioElement, HTMLAudioElement]
 }
@@ -23,12 +34,14 @@ export function createAudioGraph(hostLayer: HTMLElement): AudioGraph {
 
   const mixerGain = ctx.createGain()
   const masterGain = ctx.createGain()
+  const vizSource = ctx.createGain()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 2048
 
   mixerGain.connect(masterGain)
   masterGain.connect(ctx.destination)
-  mixerGain.connect(analyser)
+  mixerGain.connect(vizSource)
+  vizSource.connect(analyser)
 
   const make = (): HTMLAudioElement => {
     const el = new Audio()
@@ -38,5 +51,5 @@ export function createAudioGraph(hostLayer: HTMLElement): AudioGraph {
     return el
   }
 
-  return { ctx, mixerGain, masterGain, analyser, elements: [make(), make()] }
+  return { ctx, mixerGain, masterGain, vizSource, analyser, elements: [make(), make()] }
 }

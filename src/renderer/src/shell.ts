@@ -5,9 +5,11 @@
 import { native } from './native'
 import { createAudioGraph } from './audio/graph'
 import { AudioEngine } from './audio/engine'
+import { SystemAudioCapture } from './audio/systemAudio'
 import { PlayerController } from './playlist/controller'
 import { VisualizerHost } from './viz/host'
 import { SkinManager } from './skin/skinHost'
+import { AddonHost } from './addon/addonHost'
 import { PlaylistWindow } from './playlist/playlistWindow'
 
 async function boot(): Promise<void> {
@@ -17,7 +19,23 @@ async function boot(): Promise<void> {
   const vizHost = new VisualizerHost(graph)
   controller.attachVizHost(vizHost) // video plays on the visualizer surface
   const playlistWindow = new PlaylistWindow(controller)
-  const skinManager = new SkinManager({ controller, engine, vizHost, playlistWindow })
+  const systemAudio = new SystemAudioCapture(graph)
+
+  const baseDeps = { controller, engine, vizHost, playlistWindow, systemAudio }
+  const skinManager = new SkinManager(baseDeps)
+  const addonHost = new AddonHost(baseDeps)
+  // Skins and addons both expose the full API, so each needs the other's ops.
+  skinManager.setAddonOps(addonHost.ops)
+  addonHost.setSkinOps(skinManager.ops)
+
+  // System-audio mode pauses our own playback (you're visualizing another app);
+  // starting local playback (audio or video) turns it back off — normal precedence.
+  systemAudio.events.on('change', (on) => {
+    if (on) controller.pause()
+  })
+  controller.events.on('state', (s) => {
+    if ((s === 'playing' || s === 'loading') && systemAudio.isEnabled()) systemAudio.disable()
+  })
 
   // MilkDrop-style song title flourish on track change.
   controller.events.on('track', (t) => {
@@ -84,6 +102,9 @@ async function boot(): Promise<void> {
   const settings = await native.invoke('store:settings:get')
   vizHost.init(settings)
   await controller.restore(settings)
+  // Load addons before the skin so addon-provided visualizers are registered
+  // by the time the skin attaches its canvas and picks the active visualizer.
+  await addonHost.boot()
   await skinManager.boot()
 
   if (native.demoPath) {
@@ -92,7 +113,7 @@ async function boot(): Promise<void> {
 
   if (native.selftestPath) {
     const { runSelfTest } = await import('./selftest')
-    await runSelfTest(native.selftestPath, controller, skinManager, vizHost)
+    await runSelfTest(native.selftestPath, controller, skinManager, vizHost, systemAudio)
   }
 }
 

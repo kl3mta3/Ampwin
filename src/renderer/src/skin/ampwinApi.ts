@@ -9,6 +9,7 @@ import type { AudioEngine } from '../audio/engine'
 import type { PlayerController } from '../playlist/controller'
 import type { VisualizerHost } from '../viz/host'
 import type { PlaylistWindow } from '../playlist/playlistWindow'
+import type { SystemAudioCapture } from '../audio/systemAudio'
 import { DragRegionMirror } from './dragRegions'
 
 export interface SkinOps {
@@ -17,12 +18,21 @@ export interface SkinOps {
   setActive: (id: string) => Promise<void>
 }
 
+/** Enable/disable + uninstall route through the AddonHost so the loaded-iframe
+ *  set stays in sync with the persisted setting. */
+export interface AddonOps {
+  setEnabled: (id: string, enabled: boolean) => Promise<void>
+  uninstall: (id: string) => Promise<void>
+}
+
 export interface FacadeDeps {
   controller: PlayerController
   engine: AudioEngine
   vizHost: VisualizerHost
   playlistWindow: PlaylistWindow
+  systemAudio: SystemAudioCapture
   skinOps: SkinOps
+  addonOps: AddonOps
 }
 
 export interface SkinFacade {
@@ -30,11 +40,19 @@ export interface SkinFacade {
   dispose(): void
 }
 
-export function buildFacade(deps: FacadeDeps, onReady: () => void): SkinFacade {
-  const { controller, vizHost, playlistWindow, skinOps } = deps
+/** Who owns this facade instance — decides plugin lifetime + teardown. */
+export type FacadeOwner = { kind: 'skin' } | { kind: 'addon'; addonId: string }
+
+export function buildFacade(
+  deps: FacadeDeps,
+  onReady: () => void,
+  owner: FacadeOwner = { kind: 'skin' }
+): SkinFacade {
+  const { controller, vizHost, playlistWindow, systemAudio, skinOps, addonOps } = deps
   const unsubs: (() => void)[] = []
   const dragMirror = new DragRegionMirror()
   let disposed = false
+  const pluginOwner = owner.kind === 'skin' ? 'skin' : (`addon:${owner.addonId}` as const)
 
   const track = <T extends () => void>(unsub: T): T => {
     unsubs.push(unsub)
@@ -178,7 +196,7 @@ export function buildFacade(deps: FacadeDeps, onReady: () => void): SkinFacade {
       getActiveVisualizerId: () => vizHost.getActiveVisualizerId(),
       listVisualizers: () => vizHost.listVisualizers(),
       setActiveVisualizer: (id) => void vizHost.setActiveVisualizer(id),
-      registerPlugin: (plugin: VisualizerPlugin) => vizHost.registry.register(plugin, true),
+      registerPlugin: (plugin: VisualizerPlugin) => vizHost.registry.register(plugin, pluginOwner),
       on: ((ev: string, cb: (...args: any[]) => void) => {
         if (ev === 'preset') return track(vizHost.events.on('preset', cb))
         return () => {}
@@ -198,6 +216,44 @@ export function buildFacade(deps: FacadeDeps, onReady: () => void): SkinFacade {
       getActiveId: () => skinOps.getActiveId(),
       setActive: (id) => skinOps.setActive(id),
       openSkinsFolder: () => void native.invoke('skins:open-folder')
+    },
+
+    system: {
+      isEnabled: () => systemAudio.isEnabled(),
+      enable: () => systemAudio.enable(),
+      disable: () => systemAudio.disable(),
+      toggle: () => systemAudio.toggle(),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'change') return track(systemAudio.events.on('change', cb))
+        return () => {}
+      }) as AmpwinApi['system']['on']
+    },
+
+    addons: {
+      list: () => native.invoke('addons:list'),
+      catalog: () => native.invoke('addons:catalog'),
+      install: (id) => native.invoke('addons:install', id),
+      setEnabled: (id, enabled) => addonOps.setEnabled(id, enabled),
+      uninstall: (id) => addonOps.uninstall(id),
+      openFolder: () => void native.invoke('addons:open-folder'),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'progress') {
+          return track(native.on('evt:addon-progress', ({ id, percent }) => cb(id, percent)))
+        }
+        return () => {}
+      }) as AmpwinApi['addons']['on']
+    },
+
+    convert: {
+      list: (isVideo) => native.invoke('convert:list', isVideo),
+      start: (t, formatId) => controller.convertTrack(t, formatId),
+      openFolder: () => void native.invoke('convert:open-folder'),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'progress') {
+          return track(native.on('evt:convert-progress', ({ percent }) => cb(percent)))
+        }
+        return () => {}
+      }) as AmpwinApi['convert']['on']
     },
 
     links: {
@@ -230,7 +286,8 @@ export function buildFacade(deps: FacadeDeps, onReady: () => void): SkinFacade {
       for (const u of unsubs) u()
       unsubs.length = 0
       dragMirror.destroy()
-      vizHost.onSkinTeardown()
+      if (owner.kind === 'skin') vizHost.onSkinTeardown()
+      else vizHost.onAddonTeardown(owner.addonId)
     }
   }
 }

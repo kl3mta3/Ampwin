@@ -546,6 +546,26 @@ input[type='range'] {
   padding: 4px 6px;
 }
 
+#convert-format {
+  width: 100%;
+  max-width: none;
+}
+
+#convert-bar {
+  height: 14px;
+  background: var(--bg-inset);
+  border: 1px solid var(--edge-lo);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#convert-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--green-dim), var(--green));
+  transition: width 0.2s;
+}
+
 /* remote (link) and unreadable rows */
 .pl-row.remote .pl-num::after {
   content: ' ⇢';
@@ -561,4 +581,69 @@ input[type='range'] {
   content: ' — unreadable';
   color: #a05a5a;
   font-style: italic;
+}
+
+/* ---- addons browser ---- */
+#addons-list {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 180px;
+  max-height: 52vh;
+  border: 1px solid var(--edge-lo);
+  background: var(--bg-inset);
+}
+
+.addon-row {
+  display: flex;
+  gap: 8px;
+  padding: 7px 8px;
+  align-items: center;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.35);
+}
+
+.addon-row:hover {
+  background: rgba(63, 223, 111, 0.08);
+}
+
+.addon-meta {
+  flex: 1;
+  overflow: hidden;
+}
+
+.addon-title {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.addon-ver {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: normal;
+}
+
+.addon-desc {
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.addon-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.addon-actions button {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.addon-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
 }

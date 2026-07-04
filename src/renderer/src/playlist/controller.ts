@@ -360,6 +360,14 @@ export class PlayerController {
     }
   }
 
+  /** Convert a local file to a chosen format (saved to downloads/Converted).
+   *  Rejects with the ffmpeg error message so the caller can show why. */
+  async convertTrack(track: Track, formatId: string): Promise<string> {
+    if (track.isRemote) throw new Error('cannot convert a remote link — download it first')
+    const { path } = await native.invoke('convert:start', track.path, formatId)
+    return path
+  }
+
   /** Add a URL (YouTube/site link or direct media URL) as a remote track. */
   async addLink(url: string, audioOnly: boolean): Promise<Track | null> {
     const probe = await native.invoke('link:probe', url.trim(), audioOnly)

@@ -94,8 +94,8 @@ export class VisualizerHost {
 
   constructor(graph: AudioGraph) {
     this.graph = graph
-    this.registry.register(createButterchurnPlugin(), false)
-    this.registry.register(createBarsPlugin(), false)
+    this.registry.register(createButterchurnPlugin(), 'builtin')
+    this.registry.register(createBarsPlugin(), 'builtin')
 
     document.addEventListener('visibilitychange', () => {
       if (this.mode !== 'viz') return
@@ -243,7 +243,7 @@ export class VisualizerHost {
       await plugin.init({
         canvas,
         audioContext: this.graph.ctx,
-        sourceNode: this.graph.mixerGain,
+        sourceNode: this.graph.vizSource,
         analyser: this.graph.analyser
       })
     } catch (err) {
@@ -495,6 +495,17 @@ export class VisualizerHost {
     }
     this.teardownSurface()
     this.skinAnchor = null
+  }
+
+  /** An addon was disabled/uninstalled: drop its visualizer plugins. If one of
+   *  them was active, fall back to butterchurn and re-init on the live surface
+   *  so the view keeps rendering. */
+  onAddonTeardown(addonId: string): void {
+    const removed = this.registry.removeAddonOwned(addonId)
+    if (removed.includes(this.activeId)) {
+      this.activeId = 'butterchurn'
+      if (this.surface && this.mode === 'viz') void this.remountSameTarget()
+    }
   }
 
   // ---- presets ---------------------------------------------------------------

@@ -12,6 +12,7 @@
 // ===========================================================================
 
 import type {
+  AddonInfo,
   PlayerSnapshot,
   PlayState,
   PresetInfo,
@@ -32,7 +33,9 @@ export interface VisualizerPlugin {
   init(ctx: {
     canvas: HTMLCanvasElement
     audioContext: AudioContext
-    /** Pre-volume mix point — connect your own analysers here. */
+    /** The visualizer audio source — connect your own analysers here. Its input
+     *  is whatever is being visualized: Ampwin's own playback, or (in System
+     *  audio mode) the whole system's output. Swaps are transparent to you. */
     sourceNode: AudioNode
     /** Convenience shared analyser tap (fftSize 2048). */
     analyser: AnalyserNode
@@ -153,6 +156,50 @@ export interface AmpwinApi {
     setActive(id: string): Promise<void>
     /** Open the user skins folder in Explorer. */
     openSkinsFolder(): void
+  }
+
+  /** System-audio visualizer mode: drive the visualizer from the computer's
+   *  entire audio output (WASAPI loopback) instead of Ampwin's own playback —
+   *  so it reacts to Spotify, a browser, a game, anything. Enabling pauses
+   *  Ampwin's own playback; starting local playback (or a video) turns it back
+   *  off. State is app-wide (survives skin switches) and not persisted. */
+  system: {
+    isEnabled(): boolean
+    /** Begin capture. Must be called from a user gesture; rejects if the user
+     *  cancels or loopback is unavailable. */
+    enable(): Promise<void>
+    disable(): void
+    toggle(): Promise<void>
+    on(ev: 'change', cb: (enabled: boolean) => void): Unsubscribe
+  }
+
+  /** Addons: user-installable extensions (a folder with addon.json + JS) from a
+   *  GitHub repo. An enabled addon loads with this same full API and can, e.g.,
+   *  register visualizer plugins that persist across skin switches. */
+  addons: {
+    /** Installed addons and their enabled state (no network). */
+    list(): Promise<AddonInfo[]>
+    /** Repo catalog merged with installed state; catalogError set if offline. */
+    catalog(): Promise<{ addons: AddonInfo[]; catalogError?: string }>
+    /** Download + install by id (does not enable). Listen via on('progress'). */
+    install(id: string): Promise<AddonInfo>
+    /** Enable/disable: loads or unloads the addon immediately. */
+    setEnabled(id: string, enabled: boolean): Promise<void>
+    uninstall(id: string): Promise<void>
+    openFolder(): void
+    /** Install progress (0–100) for a given addon id. */
+    on(ev: 'progress', cb: (id: string, percent: number) => void): Unsubscribe
+  }
+
+  /** Convert a local file to another format via the bundled ffmpeg. Output
+   *  goes to the downloads/Converted folder. */
+  convert: {
+    /** Format options for the source type (video sources include audio-only). */
+    list(isVideo: boolean): Promise<{ id: string; label: string }[]>
+    /** Convert; resolves to the saved file path, or rejects with the reason. */
+    start(track: Track, formatId: string): Promise<string>
+    openFolder(): void
+    on(ev: 'progress', cb: (percent: number) => void): Unsubscribe
   }
 
   /** Remote sources: paste a URL or search YouTube. YouTube needs yt-dlp,

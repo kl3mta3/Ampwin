@@ -3,11 +3,13 @@ import { createReadStream, promises as fsp } from 'fs'
 import { Readable } from 'stream'
 import { extOf } from '../shared/formats'
 import { resolveSkinAsset } from './skins'
+import { resolveAddonAsset } from './addons'
 import { extractArtwork } from './metadata'
 
 // ampwin:// routes:
 //   ampwin://media/<base64url(absolutePath)>   media bytes (Range-capable)
 //   ampwin://skin/<skinId>/<relPath>           skin assets (wired in M3)
+//   ampwin://addon/<addonId>/<relPath>         addon assets (JS loaded by iframe)
 //   ampwin://art/<trackKey>                    embedded album art (wired in M2+)
 
 /** Only paths registered via media:prepare this session are servable — a
@@ -41,6 +43,8 @@ export function installAmpwinProtocol(): void {
         return handleMedia(url, request)
       case 'skin':
         return handleSkinAsset(url)
+      case 'addon':
+        return handleAddonAsset(url)
       case 'art':
         return handleArt(url)
       default:
@@ -80,6 +84,23 @@ async function handleSkinAsset(url: URL): Promise<Response> {
     })
   } catch {
     return textResponse(404, 'skin asset not found')
+  }
+}
+
+/** ampwin://addon/<addonId>/<relPath> — assets jailed to the addon folder. */
+async function handleAddonAsset(url: URL): Promise<Response> {
+  const [, addonId, ...rest] = url.pathname.split('/')
+  if (!addonId || rest.length === 0) return textResponse(400, 'bad addon asset url')
+  const abs = await resolveAddonAsset(addonId, decodeURIComponent(rest.join('/')))
+  if (!abs) return textResponse(404, 'addon asset not found')
+  try {
+    const data = await fsp.readFile(abs)
+    return new Response(new Uint8Array(data), {
+      status: 200,
+      headers: { 'Content-Type': mimeFor(abs) }
+    })
+  } catch {
+    return textResponse(404, 'addon asset not found')
   }
 }
 

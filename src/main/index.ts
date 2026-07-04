@@ -46,6 +46,8 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     installAmpwinProtocol()
     registerIpcHandlers()
+    // Answer getDisplayMedia() with system-audio loopback for "System audio" mode.
+    ;(await import('./systemAudio')).installSystemAudioHandler()
 
     const settings = await getSettings()
     const win = createMainWindow(settings.windowBounds)
@@ -59,6 +61,9 @@ if (!app.requestSingleInstanceLock()) {
     // Seed the bundled yt-dlp into userData and keep it current (no network for
     // users who never touch YouTube).
     void import('./ytdlp').then(({ initYtDlpAtStartup }) => initYtDlpAtStartup())
+    // Seed ffmpeg/ffprobe into userData: the portable build's %TEMP% extraction
+    // can be cleaned up mid-session, and the seed keeps spawns working.
+    void import('./ffmpeg/paths').then(({ seedFfmpegToUserData }) => seedFfmpegToUserData())
   })
 
   app.on('will-quit', () => {
