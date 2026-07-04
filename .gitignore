@@ -7,6 +7,9 @@ node_modules/
 out/
 dist/
 dist-installer/
+dist-fresh/
+dist-fresh2/
+dist-*/
 *.tsbuildinfo
 .vite/
 
@@ -15,6 +18,10 @@ coverage/
 # generated test media (keep only the generator script)
 test-media/*
 !test-media/generate.ps1
+
+# ---- bundled binaries fetched at build time (not committed) ----
+build/bin/*
+!build/bin/.gitkeep
 
 # ---- runtime data ----
 # Lives in %APPDATA%\Ampwin, never in the repo. Anchored to root so these only
@@ -47,4 +54,4 @@ Thumbs.db
 Desktop.ini
 
 # NOTE: build/ (app icon), package-lock.json, skins/, and src/ are intentionally
-# committed — do not add them here.
+# committed â€” do not add them here.

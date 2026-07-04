@@ -1,0 +1,3 @@
+# Keeps build/bin/ present so electron-builder's extraResources copy never
+# fails. yt-dlp.exe is fetched here at build time by scripts/fetch-ytdlp.mjs
+# and is intentionally gitignored.
