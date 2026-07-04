@@ -115,6 +115,8 @@ export interface IpcInvokeMap {
     result: { streamUrl: string; isVideo: boolean }
   }
   'yt:search': { args: [query: string]; result: YtSearchResult[] }
+  /** Expand a playlist/mix/radio URL into its entries (flat, capped). */
+  'link:expand-playlist': { args: [url: string]; result: YtSearchResult[] }
   /** Download a URL to the downloads folder; emits evt:download-progress. */
   'link:download': {
     args: [url: string, kind: 'audio' | 'video' | 'both']

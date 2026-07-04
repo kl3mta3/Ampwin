@@ -80,11 +80,14 @@ export class AddonHost {
       console.error('failed to list addons at boot', err)
       return
     }
+    if (enabled.length) {
+      void native.invoke('dev:log', `[addon] loading ${enabled.length}: ${enabled.map((a) => a.id).join(',')}`)
+    }
     for (const info of enabled) {
       try {
         await this.loadAddon(info)
       } catch (err) {
-        console.error(`addon "${info.id}" failed to load`, err)
+        void native.invoke('dev:log', `[addon] "${info.id}" failed to load: ${(err as Error).message}`)
       }
     }
   }
@@ -115,7 +118,16 @@ export class AddonHost {
       `<script>window.ampwin = window.parent.__ampwinBindAddon(${idJson}, window)<\/script>` +
       `<script src="${info.entry}"><\/script>` +
       `</head><body></body></html>`
+    // Resolve once the iframe's scripts have run (so the addon's plugins are
+    // registered). Awaiting this lets boot() finish addon loading *before* the
+    // skin renders its visualizer list — no "reopen the dropdown" race. Capped
+    // so a broken/slow addon can never hang startup.
+    const ready = new Promise<void>((resolve) => {
+      iframe.addEventListener('load', () => resolve())
+      setTimeout(resolve, 3000)
+    })
     document.getElementById('addon-layer')!.appendChild(iframe)
+    await ready
   }
 
   private unloadAddon(id: string): void {

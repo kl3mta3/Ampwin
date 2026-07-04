@@ -10,36 +10,47 @@ echo.
 REM --- Node 20+ via nvm-windows, if present -------------------------------
 where nvm >nul 2>nul
 if %errorlevel%==0 (
-  echo [1/5] Selecting Node 24.15.0 via nvm...
+  echo [1/6] Selecting Node 24.15.0 via nvm...
   call nvm use 24.15.0 >nul 2>nul
 ) else (
-  echo [1/5] nvm not found; using whatever "node" is on PATH.
+  echo [1/6] nvm not found; using whatever "node" is on PATH.
 )
 
-REM Confirm node is usable and new enough-ish
 where node >nul 2>nul || (echo ERROR: node is not on PATH. & goto :error)
 for /f "delims=" %%V in ('node --version') do echo       node %%V
 
-REM --- Close any running Ampwin so its files aren't locked ------------------
-echo [2/5] Closing any running Ampwin...
+REM --- Close any running Ampwin / stray electron so build files aren't locked.
+REM     We launch the PORTABLE at the end (runs from %TEMP%), never win-unpacked,
+REM     so the build output never stays locked between runs. Give Windows a
+REM     moment to release handles (Defender/SearchIndexer scan freshly written files).
+echo [2/6] Closing any running Ampwin / electron...
 taskkill /IM Ampwin.exe /F >nul 2>nul
+taskkill /IM electron.exe /F >nul 2>nul
+ping -n 3 127.0.0.1 >nul
 
 REM --- Dependencies --------------------------------------------------------
 if not exist "node_modules" (
-  echo [3/5] Installing dependencies ^(first run^)...
+  echo [3/6] Installing dependencies ^(first run^)...
   call npm install || goto :error
 ) else (
-  echo [3/5] Dependencies present ^(delete node_modules to force reinstall^).
+  echo [3/6] Dependencies present ^(delete node_modules to force reinstall^).
 )
 
-REM --- Remove previous installer(s) so only the fresh build remains --------
-echo [4/5] Clearing old installer output...
-if exist "dist-installer\*.exe"      del /q "dist-installer\*.exe"      >nul 2>nul
-if exist "dist-installer\*.blockmap" del /q "dist-installer\*.blockmap" >nul 2>nul
+REM --- Clean the scratch build folder (safe: nothing runs from it) ---------
+echo [4/6] Clearing scratch build folder...
+if exist "dist-build" rmdir /s /q "dist-build" >nul 2>nul
 
-REM --- Build ---------------------------------------------------------------
-echo [5/5] Building ^(electron-vite + electron-builder, ~1-2 min^)...
+REM --- Build (electron-vite compile + electron-builder package) ------------
+echo [5/6] Building ^(electron-vite + electron-builder, ~1-2 min^)...
 call npm run dist || goto :error
+
+REM --- Deliver just the installers to dist-installer -----------------------
+echo [6/6] Copying installers to dist-installer...
+if not exist "dist-installer" mkdir "dist-installer"
+del /q "dist-installer\*.exe"      >nul 2>nul
+del /q "dist-installer\*.blockmap" >nul 2>nul
+copy /y "dist-build\*.exe"      "dist-installer\" >nul || goto :error
+copy /y "dist-build\*.blockmap" "dist-installer\" >nul 2>nul
 
 echo.
 echo ============================================
@@ -47,12 +58,13 @@ echo   Build complete
 echo ============================================
 for %%F in ("dist-installer\*portable.exe") do echo   Portable  : %%~fF
 for %%F in ("dist-installer\*Setup*.exe")    do echo   Installer : %%~fF
-echo   Folder    : %CD%\dist-installer\win-unpacked\Ampwin.exe
+echo   ^(folder build: %CD%\dist-build\win-unpacked\Ampwin.exe^)
 echo.
 
-REM --- Launch the freshly built app (remove these lines to skip) -----------
-echo Launching...
-start "" "%CD%\dist-installer\win-unpacked\Ampwin.exe"
+REM --- Launch the PORTABLE (extracts to %TEMP%; does NOT lock the build
+REM     output, so the next build won't be blocked). -------------------------
+echo Launching portable...
+for %%F in ("dist-installer\*portable.exe") do start "" "%%~fF"
 
 endlocal
 exit /b 0
@@ -61,5 +73,9 @@ exit /b 0
 echo.
 echo *** BUILD FAILED (exit code %errorlevel%) ***
 echo Tip: close Ampwin if it's open, then run this again.
+echo      If it keeps failing on a locked file, add a Microsoft Defender
+echo      exclusion for this folder (Windows Security ^> Virus ^& threat
+echo      protection ^> Manage settings ^> Exclusions), or reboot to clear
+echo      the stale lock on dist-installer\win-unpacked.
 endlocal
 exit /b 1

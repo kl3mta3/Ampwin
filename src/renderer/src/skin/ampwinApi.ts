@@ -196,9 +196,10 @@ export function buildFacade(
       getActiveVisualizerId: () => vizHost.getActiveVisualizerId(),
       listVisualizers: () => vizHost.listVisualizers(),
       setActiveVisualizer: (id) => void vizHost.setActiveVisualizer(id),
-      registerPlugin: (plugin: VisualizerPlugin) => vizHost.registry.register(plugin, pluginOwner),
+      registerPlugin: (plugin: VisualizerPlugin) => vizHost.registerPlugin(plugin, pluginOwner),
       on: ((ev: string, cb: (...args: any[]) => void) => {
         if (ev === 'preset') return track(vizHost.events.on('preset', cb))
+        if (ev === 'visualizers') return track(vizHost.events.on('visualizers', cb))
         return () => {}
       }) as AmpwinApi['visualizer']['on']
     },
@@ -260,6 +261,8 @@ export function buildFacade(
       ytdlpInstalled: async () => (await native.invoke('ytdlp:status')).installed,
       ensureYtDlp: () => native.invoke('ytdlp:ensure'),
       add: (url, audioOnly) => controller.addLink(url, audioOnly),
+      addSearchResult: (result, audioOnly) => controller.addSearchResult(result, audioOnly),
+      addPlaylist: (url, audioOnly) => controller.addPlaylist(url, audioOnly),
       download: (t, kind) => controller.downloadTrack(t, kind),
       openDownloadsFolder: () => void native.invoke('downloads:open-folder'),
       search: (query) => native.invoke('yt:search', query),

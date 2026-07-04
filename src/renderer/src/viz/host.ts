@@ -33,6 +33,8 @@ interface HostEvents extends Record<string, unknown[]> {
   videoState: [VideoState]
   videoEnded: []
   videoError: [message: string]
+  /** The set of available visualizers changed (addon registered/removed). */
+  visualizers: [list: { id: string; name: string }[]]
 }
 
 /** Minimal transport surface for the pop-out / fullscreen buttons — provided by
@@ -452,6 +454,13 @@ export class VisualizerHost {
     return this.registry.list()
   }
 
+  /** Register a plugin and notify listeners so UIs (e.g. the skin's visualizer
+   *  dropdown) refresh immediately — addons register asynchronously after boot. */
+  registerPlugin(plugin: VisualizerPlugin, owner: Parameters<PluginRegistry['register']>[1]): void {
+    this.registry.register(plugin, owner)
+    this.events.emit('visualizers', this.registry.list())
+  }
+
   async setActiveVisualizer(id: string): Promise<void> {
     if (!this.registry.get(id)) throw new Error(`unknown visualizer: ${id}`)
     if (id === this.activeId && this.active) return
@@ -472,6 +481,17 @@ export class VisualizerHost {
     }
   }
 
+  /** Re-init the active visualizer on its current surface so plugins that tap
+   *  the audio at init() (Butterchurn wires its own analyser chain in
+   *  connectAudio) re-read the source after it changes upstream — e.g. when
+   *  System-audio mode swaps vizSource's input. The shared analyser (spectrum
+   *  bars) picks the swap up live and needs no remount, but this is harmless
+   *  for it. No-op in video mode. */
+  async refreshForSourceChange(): Promise<void> {
+    if (this.mode !== 'viz' || !this.surface || !this.active) return
+    await this.remountSameTarget()
+  }
+
   /** Rebuild the surface at its current location (used to get a fresh canvas). */
   private async remountSameTarget(): Promise<void> {
     if (this.popoutWin && !this.popoutWin.closed) {
@@ -486,6 +506,7 @@ export class VisualizerHost {
 
   onSkinTeardown(): void {
     const removed = this.registry.removeSkinOwned()
+    if (removed.length) this.events.emit('visualizers', this.registry.list())
     if (removed.includes(this.activeId)) this.activeId = 'butterchurn'
     if (this.fsContainer) void this.setFullscreen(false)
     // A pop-out keeps rendering; only its return target dies with the skin.
@@ -502,6 +523,7 @@ export class VisualizerHost {
    *  so the view keeps rendering. */
   onAddonTeardown(addonId: string): void {
     const removed = this.registry.removeAddonOwned(addonId)
+    if (removed.length) this.events.emit('visualizers', this.registry.list())
     if (removed.includes(this.activeId)) {
       this.activeId = 'butterchurn'
       if (this.surface && this.mode === 'viz') void this.remountSameTarget()

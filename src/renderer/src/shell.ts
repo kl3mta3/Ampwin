@@ -32,6 +32,9 @@ async function boot(): Promise<void> {
   // starting local playback (audio or video) turns it back off — normal precedence.
   systemAudio.events.on('change', (on) => {
     if (on) controller.pause()
+    // Re-init the active visualizer so plugins that wire their audio at init
+    // (Butterchurn) re-tap the swapped source; spectrum bars update live anyway.
+    void vizHost.refreshForSourceChange()
   })
   controller.events.on('state', (s) => {
     if ((s === 'playing' || s === 'loading') && systemAudio.isEnabled()) systemAudio.disable()

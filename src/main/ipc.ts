@@ -22,6 +22,7 @@ import {
   downloadLink,
   downloadsDir,
   ensureYtDlp,
+  expandPlaylist,
   isInstalled,
   probeLink,
   resolveStream,
@@ -359,6 +360,7 @@ export function registerIpcHandlers(): void {
   handle('link:probe', (_event, url, audioOnly) => probeLink(url, audioOnly))
   handle('link:resolve', (_event, url, audioOnly) => resolveStream(url, audioOnly))
   handle('yt:search', (_event, query) => searchYouTube(query))
+  handle('link:expand-playlist', (_event, url) => expandPlaylist(url))
 
   handle('link:download', async (event, url, kind) => {
     const path = await downloadLink(url, kind, (percent, phase) => {
@@ -405,12 +407,12 @@ export function registerIpcHandlers(): void {
   handle('dev:log', async (_event, message) => {
     console.log(`[renderer] ${message}`)
     // Packaged GUI apps have no visible stdout — mirror to a log file so the
-    // self-test is verifiable against the installed build too.
-    if (process.env['AMPWIN_SELFTEST']) {
+    // self-test is verifiable against the installed build too. [addon]/[error]
+    // lines are always logged so packaged issues can be diagnosed.
+    if (process.env['AMPWIN_SELFTEST'] || /^\[(addon|error)\]/.test(message)) {
       const { app } = await import('electron')
-      await fsp
-        .appendFile(join(app.getPath('userData'), 'selftest.log'), `${message}\n`)
-        .catch(() => {})
+      const file = process.env['AMPWIN_SELFTEST'] ? 'selftest.log' : 'debug.log'
+      await fsp.appendFile(join(app.getPath('userData'), file), `${message}\n`).catch(() => {})
     }
   })
 }

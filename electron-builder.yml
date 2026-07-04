@@ -1,7 +1,12 @@
 appId: com.ampwin.player
 productName: Ampwin
 directories:
-  output: dist-installer
+  # Build into a scratch folder that nothing runs from. Windows Defender /
+  # SearchIndexer keep a persistent handle on the app.asar of whatever
+  # win-unpacked the app was last launched from, which made rebuilding into the
+  # delivery folder fail (EBUSY). build.cmd copies the finished installers out
+  # of here into dist-installer and launches the portable (runs from %TEMP%).
+  output: dist-build
   buildResources: build
 files:
   - out/**

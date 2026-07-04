@@ -2,7 +2,14 @@
 // error skipping, next-track preload, session + settings persistence.
 // This is the object the skin API facade will wrap in M3.
 
-import type { PlayerSnapshot, PlayState, RepeatMode, Track, TrackProbe } from '../../../shared/types'
+import type {
+  PlayerSnapshot,
+  PlayState,
+  RepeatMode,
+  Track,
+  TrackProbe,
+  YtSearchResult
+} from '../../../shared/types'
 import { native } from '../native'
 import { Emitter } from '../emitter'
 import { AudioEngine } from '../audio/engine'
@@ -11,6 +18,18 @@ import { PlaylistModel } from './model'
 
 const PRELOAD_AHEAD_SEC = 15
 const MAX_CONSECUTIVE_ERRORS = 3
+
+/** Build a user-facing message for a failed remote play. YouTube commonly
+ *  blocks official-music/VEVO and age-restricted videos for logged-out users
+ *  ("Sign in to confirm you're not a bot", "age-restricted"); when we see that,
+ *  point the user at the sign-in button instead of showing raw yt-dlp stderr. */
+function linkErrorMessage(err: Error): string {
+  const raw = err.message || 'unknown error'
+  if (/sign in|not a bot|age|consent|login required|private video|cookies/i.test(raw)) {
+    return `can't play this without signing in — use “sign in” in the + link dialog (${raw.slice(0, 120)})`
+  }
+  return `link failed: ${raw}`
+}
 
 interface ControllerEvents extends Record<string, unknown[]> {
   track: [Track | null]
@@ -249,7 +268,7 @@ export class PlayerController {
       } catch (err) {
         this.exitVideoMode()
         this.events.emit('state', 'idle')
-        this.events.emit('error', `link failed: ${(err as Error).message}`, track)
+        this.events.emit('error', linkErrorMessage(err as Error), track)
       }
       return
     }
@@ -391,6 +410,39 @@ export class PlayerController {
     }
     this.model.add([track])
     return track
+  }
+
+  /** Add a YouTube search result directly. Unlike addLink() this does NOT run a
+   *  second yt-dlp probe — the search already gave us title/duration/uploader,
+   *  and a per-video extract can fail on VEVO/official-music or age-gated videos
+   *  (bot checks / PO-token). The real stream URL is resolved at play time,
+   *  which updates yt-dlp and retries on failure. So a result always adds; if
+   *  it truly can't play, the error surfaces then (and signing in often fixes it). */
+  addSearchResult(result: YtSearchResult, audioOnly: boolean): Track {
+    const track: Track = {
+      id: crypto.randomUUID(),
+      path: result.url,
+      title: result.title,
+      artist: result.uploader ?? '',
+      album: '',
+      durationSec: result.durationSec,
+      codec: 'stream',
+      verdict: 'native',
+      isVideo: !audioOnly,
+      mtimeMs: 0,
+      isRemote: true,
+      audioOnly
+    }
+    this.model.add([track])
+    return track
+  }
+
+  /** Expand a YouTube playlist/mix/radio URL and append every entry as a remote
+   *  track (no per-video probe — flat metadata + play-time resolve). Returns the
+   *  added tracks; throws with a reason if the playlist can't be read. */
+  async addPlaylist(url: string, audioOnly: boolean): Promise<Track[]> {
+    const entries = await native.invoke('link:expand-playlist', url.trim())
+    return entries.map((e) => this.addSearchResult(e, audioOnly))
   }
 
   /** Import .m3u/.m3u8/.pls: replaces the current playlist. Returns the

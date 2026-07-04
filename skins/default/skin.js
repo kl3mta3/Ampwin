@@ -601,6 +601,9 @@
   }
 
   const isSiteLink = (url) => /^https?:\/\//i.test(url) && !/\.(mp3|m4a|flac|ogg|opus|wav|mp4|mkv|webm|avi|mov|m3u8)($|\?)/i.test(url)
+  // A YouTube playlist / mix / radio link (has a list= param, or /playlist).
+  const isPlaylistLink = (url) =>
+    /youtube\.com|youtu\.be/i.test(url) && (/[?&]list=/.test(url) || /\/playlist\b/.test(url))
 
   $('btn-add-link').addEventListener('click', async () => {
     $('link-url').value = ''
@@ -617,8 +620,28 @@
     url = (url || '').trim()
     if (!url) return false
     if (isSiteLink(url) && !(await ensureYtDlpReady(statusEl))) return false
-    statusEl.textContent = 'Adding…'
     const before = ampwin.playlist.getTracks().length
+
+    // Playlist / mix / radio link → add every entry.
+    if (isPlaylistLink(url)) {
+      statusEl.textContent = 'Loading playlist…'
+      let tracks
+      try {
+        tracks = await ampwin.links.addPlaylist(url, audioOnly)
+      } catch (err) {
+        statusEl.textContent = 'Could not load playlist: ' + (err.message || err)
+        return false
+      }
+      if (!tracks.length) {
+        statusEl.textContent = 'Playlist was empty or unavailable.'
+        return false
+      }
+      statusEl.textContent = `Added ${tracks.length} track${tracks.length === 1 ? '' : 's'} from playlist.`
+      if (ampwin.player.getSnapshot().state === 'idle') ampwin.playlist.playIndex(before)
+      return true
+    }
+
+    statusEl.textContent = 'Adding…'
     const track = await ampwin.links.add(url, audioOnly)
     if (!track) {
       statusEl.textContent = 'Could not add that link.'
@@ -687,16 +710,13 @@
       sub.textContent = [r.uploader, fmt(r.durationSec)].filter(Boolean).join(' · ')
       meta.append(title, sub)
       row.append(img, meta)
-      row.addEventListener('click', async () => {
-        $('search-status').textContent = 'Adding “' + r.title + '”…'
+      row.addEventListener('click', () => {
+        // Add using the search metadata directly — no second probe that could
+        // reject VEVO/age-gated results. The stream resolves when played.
         const before = ampwin.playlist.getTracks().length
-        const track = await ampwin.links.add(r.url, $('search-audio').checked)
-        if (track) {
-          $('search-status').textContent = 'Added: ' + r.title
-          if (ampwin.player.getSnapshot().state === 'idle') ampwin.playlist.playIndex(before)
-        } else {
-          $('search-status').textContent = 'Failed to add that result.'
-        }
+        ampwin.links.addSearchResult(r, $('search-audio').checked)
+        $('search-status').textContent = 'Added: ' + r.title
+        if (ampwin.player.getSnapshot().state === 'idle') ampwin.playlist.playIndex(before)
       })
       $('search-results').appendChild(row)
     }
@@ -752,8 +772,10 @@
       vizSel.appendChild(opt)
     }
   }
-  // Refresh on open so addon-provided visualizers show up after they register.
+  // Refresh on open, and reactively when an addon registers/removes a
+  // visualizer (they load asynchronously after boot).
   vizSel.addEventListener('mousedown', refreshVisualizers)
+  ampwin.visualizer.on('visualizers', refreshVisualizers)
   vizSel.addEventListener('change', () => ampwin.visualizer.setActiveVisualizer(vizSel.value))
 
   // presets — the catalog loads async, so refresh again when the first
@@ -862,6 +884,9 @@
           toggle.disabled = true
           await ampwin.addons.setEnabled(a.id, !a.enabled)
           a.enabled = !a.enabled
+          $('addons-status').textContent = a.enabled
+            ? `✓ ${a.name} enabled — pick it from the visualizer dropdown`
+            : `${a.name} disabled`
           renderAddons()
           refreshVisualizers()
         })
@@ -900,7 +925,7 @@
       await ampwin.addons.setEnabled(a.id, true) // auto-enable freshly installed
       a.enabled = true
       a.updateAvailable = false
-      $('addons-status').textContent = '✓ installed ' + a.name
+      $('addons-status').textContent = `✓ installed ${a.name} — pick it from the visualizer dropdown`
     } catch (err) {
       $('addons-status').textContent = '⚠ ' + (err.message || err)
       btn.textContent = label

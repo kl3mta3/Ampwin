@@ -336,3 +336,80 @@ export async function searchYouTube(query: string, count = 15): Promise<YtSearch
     thumbnail: e.thumbnails?.[0]?.url || ''
   }))
 }
+
+async function runPlaylistDump(url: string, max: number): Promise<string> {
+  const bin = await ensureYtDlp()
+  const cookies = await cookieArgs()
+  return new Promise((resolve, reject) => {
+    execFile(
+      bin,
+      ['--no-warnings', '--yes-playlist', '--flat-playlist', '-J', '-I', `1:${max}`, ...cookies, url],
+      { timeout: 90000, maxBuffer: 128 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error((stderr || err.message).trim().split('\n').slice(-3).join(' ').slice(-400)))
+        else resolve(stdout)
+      }
+    )
+  })
+}
+
+function parsePlaylistEntries(out: string): YtSearchResult[] {
+  const j = JSON.parse(out) as {
+    entries?: {
+      id?: string
+      url?: string
+      title?: string
+      duration?: number
+      uploader?: string
+      channel?: string
+      thumbnails?: { url: string }[]
+    }[]
+  }
+  return (j.entries || [])
+    .filter((e) => e.id || e.url)
+    .map((e) => ({
+      url: e.url || `https://www.youtube.com/watch?v=${e.id}`,
+      title: e.title || '(untitled)',
+      durationSec: Math.round(e.duration || 0),
+      uploader: e.uploader || e.channel || '',
+      thumbnail: e.thumbnails?.[0]?.url || ''
+    }))
+}
+
+/** A radio/mix (`list=RD…`) is "unviewable" unless the URL also carries the seed
+ *  video. The seed's video id is embedded right after the RD(…) prefix — pull it
+ *  out and add it as `v=` so yt-dlp can enumerate the mix. Returns null if the
+ *  URL already has a video or the list isn't a seed-style radio. */
+function withRadioSeed(url: string): string | null {
+  try {
+    const u = new URL(url)
+    const list = u.searchParams.get('list')
+    if (!list || u.searchParams.get('v')) return null
+    const m = /^RD(?:AMVM|MM|GMEM)?([A-Za-z0-9_-]{11})/.exec(list)
+    if (!m) return null
+    u.searchParams.set('v', m[1])
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+/** Expand a playlist/mix/radio URL into its entries (flat = fast, no per-video
+ *  extract). Capped so an endless radio can't add thousands of tracks. Uses
+ *  --yes-playlist to override the global --no-playlist used elsewhere. Radio
+ *  mixes without a seed video are retried with the seed reconstructed. */
+export async function expandPlaylist(url: string, max = 100): Promise<YtSearchResult[]> {
+  try {
+    return parsePlaylistEntries(await runPlaylistDump(url, max))
+  } catch (err) {
+    const seeded = withRadioSeed(url)
+    if (seeded) {
+      try {
+        return parsePlaylistEntries(await runPlaylistDump(seeded, max))
+      } catch {
+        /* fall through to the original error */
+      }
+    }
+    throw err
+  }
+}

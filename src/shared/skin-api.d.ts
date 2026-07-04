@@ -137,6 +137,9 @@ export interface AmpwinApi {
     setActiveVisualizer(id: string): void
     registerPlugin(plugin: VisualizerPlugin): void
     on(ev: 'preset', cb: (p: PresetInfo) => void): Unsubscribe
+    /** The available visualizers changed (an addon registered or was removed) —
+     *  refresh any visualizer picker. */
+    on(ev: 'visualizers', cb: (list: { id: string; name: string }[]) => void): Unsubscribe
   }
 
   window: {
@@ -210,8 +213,16 @@ export interface AmpwinApi {
     ytdlpInstalled(): Promise<boolean>
     /** Download yt-dlp if missing. Listen via on('download', …). */
     ensureYtDlp(): Promise<{ ok: boolean; error?: string }>
-    /** Add a URL as a remote track (audioOnly plays a video link as audio). */
+    /** Add a URL as a remote track (audioOnly plays a video link as audio).
+     *  Runs a yt-dlp probe to validate + fetch metadata; returns null on failure. */
     add(url: string, audioOnly: boolean): Promise<Track | null>
+    /** Add a YouTube search result using its existing metadata — no extra probe,
+     *  so it always adds (the stream resolves at play time). Prefer this for
+     *  search results over add(result.url). */
+    addSearchResult(result: YtSearchResult, audioOnly: boolean): Track
+    /** Expand a playlist / mix / radio URL (a link with a `list=` param) and add
+     *  every entry (capped). Returns the added tracks; rejects with a reason. */
+    addPlaylist(url: string, audioOnly: boolean): Promise<Track[]>
     /** Download a remote track to the downloads folder + add the local file
      *  to the playlist. 'both' merges best video+audio (full quality). */
     download(track: Track, kind: 'audio' | 'video' | 'both'): Promise<Track | null>

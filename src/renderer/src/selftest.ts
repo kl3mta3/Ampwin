@@ -441,6 +441,22 @@ export async function runSelfTest(
       systemAudio.disable()
       check('system audio disable() is a safe no-op when off', systemAudio.isEnabled() === false)
     }
+    // The source-change path (used on every system-audio toggle) must re-init
+    // the active visualizer cleanly — this is how Butterchurn re-taps the
+    // swapped audio. Verify with butterchurn active.
+    if (vizHost.getActiveVisualizerId() !== 'butterchurn') {
+      await vizHost.setActiveVisualizer('butterchurn')
+      await sleep(300)
+    }
+    const framesBeforeRefresh = vizHost.getDebugInfo().frameCount
+    await vizHost.refreshForSourceChange()
+    await sleep(500)
+    check(
+      'visualizer re-inits cleanly on audio-source change',
+      vizHost.getDebugInfo().frameCount > framesBeforeRefresh + 5 &&
+        vizHost.getDebugInfo().lastPresetError === null,
+      `+${vizHost.getDebugInfo().frameCount - framesBeforeRefresh} frames`
+    )
   } catch (err) {
     failed = true
     results.push(`FAIL  self-test threw: ${(err as Error).message}`)
