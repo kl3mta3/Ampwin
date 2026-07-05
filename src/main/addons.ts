@@ -37,7 +37,7 @@ async function repoBranchBase(): Promise<string> {
   for (const branch of ['main', 'master']) {
     const base = rawBaseFor(addonRepoUrl, branch)
     try {
-      const res = await net.fetch(`${base}/index.json`, { method: 'HEAD' })
+      const res = await net.fetch(`${base}/index.json`, { method: 'HEAD', cache: 'no-store' })
       if (res.ok) return base
     } catch {
       /* try next branch */
@@ -69,10 +69,12 @@ function validCatalogEntry(raw: unknown): AddonCatalogEntry | null {
   }
 }
 
-/** Fetch and parse the repo's index.json. Throws on network/parse failure. */
+/** Fetch and parse the repo's index.json. Throws on network/parse failure.
+ *  cache:'no-store' — raw.githubusercontent serves 5-minute cache headers and
+ *  Electron honors them; a freshly pushed addon must show up on ↻ immediately. */
 export async function fetchCatalog(): Promise<AddonCatalogEntry[]> {
   const base = await repoBranchBase()
-  const res = await net.fetch(`${base}/index.json`)
+  const res = await net.fetch(`${base}/index.json`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`could not read the addon repo index (HTTP ${res.status})`)
   const json = (await res.json()) as unknown
   const rawList = Array.isArray(json)
@@ -184,7 +186,7 @@ export async function browseAddons(): Promise<{ addons: AddonInfo[]; catalogErro
 // ---- install / uninstall / enable ------------------------------------------
 
 async function downloadTo(url: string, dest: string): Promise<void> {
-  const res = await net.fetch(url)
+  const res = await net.fetch(url, { cache: 'no-store' })
   if (!res.ok || !res.body) throw new Error(`download failed (HTTP ${res.status}) for ${url}`)
   const tmp = `${dest}.part`
   const out = createWriteStream(tmp)

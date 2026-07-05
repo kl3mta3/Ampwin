@@ -1,6 +1,6 @@
 {
   "name": "ampwin",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "description": "Winamp-style media player with a MilkDrop-class visualizer, HTML/CSS/JS skins, and FFmpeg-backed format support",
   "main": "./out/main/index.js",
   "author": "Kenny",
@@ -27,5 +27,8 @@
     "typescript": "^5.5.0",
     "vite": "^7.0.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.27.0"
   }
 }

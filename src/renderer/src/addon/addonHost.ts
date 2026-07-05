@@ -67,6 +67,15 @@ export class AddonHost {
     uninstall: async (id) => {
       this.unloadAddon(id)
       await native.invoke('addons:uninstall', id)
+    },
+    // After an install/update, the files on disk changed but a loaded addon's
+    // iframe still runs the OLD code — reload it so an update takes effect
+    // without an uninstall+reinstall.
+    reload: async (id) => {
+      if (!this.loaded.has(id)) return
+      this.unloadAddon(id)
+      const info = (await native.invoke('addons:list')).find((a) => a.id === id)
+      if (info?.enabled) await this.loadAddon(info)
     }
   }
 

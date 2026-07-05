@@ -27,8 +27,17 @@ interface StreamSession {
 let nextSessionId = 1
 const sessions = new Map<number, StreamSession>()
 
-const CHUNK_FLUSH_BYTES = 512 * 1024
-const CHUNK_FLUSH_MS = 150
+// Kept small so the first (tiny) fragment reaches the renderer's MSE buffer
+// promptly instead of waiting to accumulate half a MB — this is startup latency,
+// not steady-state throughput (which is bounded by the renderer's look-ahead).
+const CHUNK_FLUSH_BYTES = 128 * 1024
+const CHUNK_FLUSH_MS = 80
+
+// Fragment duration for the fragmented-MP4 output. The first playable moof isn't
+// emitted until this much video is muxed, so it's the dominant startup delay:
+// 0.5 s means the picture appears ~4× sooner than the old 2 s. Fragmentation is
+// container-level, so this does not affect encode quality.
+const FRAG_DURATION_US = 500000
 
 export async function startVideoStream(
   sender: WebContents,
@@ -68,7 +77,8 @@ export async function startVideoStream(
     '-copyts', '-avoid_negative_ts', 'disabled',
     '-f', 'mp4',
     '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
-    '-frag_duration', '2000000',
+    '-frag_duration', String(FRAG_DURATION_US),
+    '-flush_packets', '1', // write each fragment to the pipe immediately (low startup latency)
     'pipe:1'
   )
 

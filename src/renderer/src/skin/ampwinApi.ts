@@ -6,10 +6,13 @@ import type { AmpwinApi, VisualizerPlugin } from '../../../shared/skin-api'
 import type { Playlist, Track } from '../../../shared/types'
 import { native } from '../native'
 import type { AudioEngine } from '../audio/engine'
+import type { Equalizer } from '../audio/eq'
+import { EQ_FREQS, EQ_MAX_DB, EQ_MIN_DB } from '../audio/eq'
 import type { PlayerController } from '../playlist/controller'
 import type { VisualizerHost } from '../viz/host'
 import type { PlaylistWindow } from '../playlist/playlistWindow'
 import type { SystemAudioCapture } from '../audio/systemAudio'
+import type { TrackMenuRegistry } from './menuRegistry'
 import { DragRegionMirror } from './dragRegions'
 
 export interface SkinOps {
@@ -23,6 +26,8 @@ export interface SkinOps {
 export interface AddonOps {
   setEnabled: (id: string, enabled: boolean) => Promise<void>
   uninstall: (id: string) => Promise<void>
+  /** Reload a loaded addon's iframe (used after an update rewrites its files). */
+  reload: (id: string) => Promise<void>
 }
 
 export interface FacadeDeps {
@@ -31,6 +36,8 @@ export interface FacadeDeps {
   vizHost: VisualizerHost
   playlistWindow: PlaylistWindow
   systemAudio: SystemAudioCapture
+  trackMenus: TrackMenuRegistry
+  eq: Equalizer
   skinOps: SkinOps
   addonOps: AddonOps
 }
@@ -48,10 +55,19 @@ export function buildFacade(
   onReady: () => void,
   owner: FacadeOwner = { kind: 'skin' }
 ): SkinFacade {
-  const { controller, vizHost, playlistWindow, systemAudio, skinOps, addonOps } = deps
+  const { controller, vizHost, playlistWindow, systemAudio, trackMenus, eq, skinOps, addonOps } = deps
   const unsubs: (() => void)[] = []
   const dragMirror = new DragRegionMirror()
   let disposed = false
+
+  // Debounced EQ persistence — slider drags fire fast; apply live, save lazily.
+  let eqSaveTimer: number | null = null
+  const persistEq = (): void => {
+    if (eqSaveTimer !== null) clearTimeout(eqSaveTimer)
+    eqSaveTimer = window.setTimeout(() => {
+      void native.invoke('store:settings:patch', { eq: eq.state() })
+    }, 400)
+  }
   const pluginOwner = owner.kind === 'skin' ? 'skin' : (`addon:${owner.addonId}` as const)
 
   const track = <T extends () => void>(unsub: T): T => {
@@ -126,16 +142,18 @@ export function buildFacade(
           controller.stop()
           controller.model.replaceAll(pl.tracks, pl.tracks.length > 0 ? 0 : -1)
         },
-        saveCurrentAs: async (name) => {
+        saveCurrentAs: async (name, existingId) => {
           const now = Date.now()
+          // existingId → overwrite that saved playlist in place; else new id.
           const id =
+            existingId ??
             name
               .toLowerCase()
               .replace(/[^a-z0-9]+/g, '-')
               .replace(/^-+|-+$/g, '')
               .slice(0, 40) +
-            '-' +
-            now.toString(36)
+              '-' +
+              now.toString(36)
           const pl: Playlist = {
             id,
             name,
@@ -147,6 +165,7 @@ export function buildFacade(
           return id
         },
         delete: (id) => native.invoke('store:playlists:delete', id),
+        addTracksTo: (id, tracks) => controller.addTracksToSavedPlaylist(id, tracks),
         importFromFile: async () => {
           const paths = await native.invoke('dialog:open-files', 'playlist')
           if (paths.length > 0) await controller.importPlaylistFile(paths[0])
@@ -219,6 +238,37 @@ export function buildFacade(
       openSkinsFolder: () => void native.invoke('skins:open-folder')
     },
 
+    menus: {
+      registerTrackMenu: (spec) => track(trackMenus.register(spec)),
+      listTrackMenus: (t) => trackMenus.list(t),
+      invokeTrackMenu: (menuKey, itemKey, t) => trackMenus.invoke(menuKey, itemKey, t),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'changed') return track(trackMenus.events.on('changed', cb))
+        return () => {}
+      }) as AmpwinApi['menus']['on']
+    },
+
+    stems: {
+      isModelInstalled: (pack) => native.invoke('stems:model-installed', pack),
+      separate: (t, pack, opts) =>
+        native.invoke('stems:separate', t.path, pack, {
+          useGpu: opts?.useGpu ?? false,
+          force: opts?.force ?? false,
+          jobKey: opts?.jobKey ?? `${t.path}::${pack.id}`
+        }),
+      cancel: (jobKey) => void native.invoke('stems:cancel', jobKey),
+      export: async (wavPath, format, songName, stemName, folder) =>
+        (await native.invoke('stems:export', wavPath, format, songName, stemName, folder)).path,
+      mix: (wavPaths, outName) => native.invoke('stems:mix', wavPaths, outName),
+      openFolder: (folder) => void native.invoke('stems:open-folder', folder),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'progress') {
+          return track(native.on('evt:stems-progress', ({ jobKey, progress }) => cb(jobKey, progress)))
+        }
+        return () => {}
+      }) as AmpwinApi['stems']['on']
+    },
+
     system: {
       isEnabled: () => systemAudio.isEnabled(),
       enable: () => systemAudio.enable(),
@@ -230,10 +280,68 @@ export function buildFacade(
       }) as AmpwinApi['system']['on']
     },
 
+    lyrics: {
+      isAvailable: () => vizHost.lyricsAvailable(),
+      isEnabled: () => vizHost.lyricsEnabled(),
+      setEnabled: (on) => vizHost.setLyricsEnabled(on),
+      pushLive: (lines, opts) =>
+        vizHost.pushLiveLyrics(
+          lines.length ? { synced: opts?.synced ?? true, source: 'live', lines } : null
+        ),
+      clearLive: () => vizHost.clearLiveLyrics(),
+      writeSidecar: async (filePath, lines) =>
+        (await native.invoke('lyrics:write-sidecar', filePath, lines)).path,
+      fetchOnline: (t) =>
+        native.invoke('lyrics:fetch-online', {
+          artist: t.artist,
+          title: t.title,
+          album: t.album,
+          durationSec: t.durationSec
+        }),
+      on: ((ev: string, cb: (...args: any[]) => void) => {
+        if (ev === 'change') return track(vizHost.events.on('lyrics-enabled', cb))
+        if (ev === 'available') return track(vizHost.events.on('lyrics-available', cb))
+        return () => {}
+      }) as AmpwinApi['lyrics']['on']
+    },
+
+    eq: {
+      frequencies: () => EQ_FREQS.slice(),
+      range: () => ({ min: EQ_MIN_DB, max: EQ_MAX_DB }),
+      isEnabled: () => eq.isEnabled(),
+      setEnabled: (on) => {
+        eq.setEnabled(on)
+        persistEq()
+      },
+      getGains: () => eq.getGains(),
+      setGain: (i, db) => {
+        eq.setGain(i, db)
+        persistEq()
+      },
+      setGains: (arr) => {
+        eq.setGains(arr)
+        persistEq()
+      },
+      getPreamp: () => eq.getPreamp(),
+      setPreamp: (db) => {
+        eq.setPreamp(db)
+        persistEq()
+      },
+      reset: () => {
+        eq.reset()
+        persistEq()
+      }
+    },
+
     addons: {
       list: () => native.invoke('addons:list'),
       catalog: () => native.invoke('addons:catalog'),
-      install: (id) => native.invoke('addons:install', id),
+      install: async (id) => {
+        const info = await native.invoke('addons:install', id)
+        // If this was an update to an already-loaded addon, swap in the new code.
+        await addonOps.reload(id)
+        return info
+      },
       setEnabled: (id, enabled) => addonOps.setEnabled(id, enabled),
       uninstall: (id) => addonOps.uninstall(id),
       openFolder: () => void native.invoke('addons:open-folder'),

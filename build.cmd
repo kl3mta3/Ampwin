@@ -10,10 +10,10 @@ echo.
 REM --- Node 20+ via nvm-windows, if present -------------------------------
 where nvm >nul 2>nul
 if %errorlevel%==0 (
-  echo [1/6] Selecting Node 24.15.0 via nvm...
+  echo [1/7] Selecting Node 24.15.0 via nvm...
   call nvm use 24.15.0 >nul 2>nul
 ) else (
-  echo [1/6] nvm not found; using whatever "node" is on PATH.
+  echo [1/7] nvm not found; using whatever "node" is on PATH.
 )
 
 where node >nul 2>nul || (echo ERROR: node is not on PATH. & goto :error)
@@ -23,29 +23,36 @@ REM --- Close any running Ampwin / stray electron so build files aren't locked.
 REM     We launch the PORTABLE at the end (runs from %TEMP%), never win-unpacked,
 REM     so the build output never stays locked between runs. Give Windows a
 REM     moment to release handles (Defender/SearchIndexer scan freshly written files).
-echo [2/6] Closing any running Ampwin / electron...
+echo [2/7] Closing any running Ampwin / electron...
 taskkill /IM Ampwin.exe /F >nul 2>nul
 taskkill /IM electron.exe /F >nul 2>nul
 ping -n 3 127.0.0.1 >nul
 
 REM --- Dependencies --------------------------------------------------------
 if not exist "node_modules" (
-  echo [3/6] Installing dependencies ^(first run^)...
+  echo [3/7] Installing dependencies ^(first run^)...
   call npm install || goto :error
 ) else (
-  echo [3/6] Dependencies present ^(delete node_modules to force reinstall^).
+  echo [3/7] Dependencies present ^(delete node_modules to force reinstall^).
 )
 
 REM --- Clean the scratch build folder (safe: nothing runs from it) ---------
-echo [4/6] Clearing scratch build folder...
+echo [4/7] Clearing scratch build folder...
 if exist "dist-build" rmdir /s /q "dist-build" >nul 2>nul
 
+REM --- Version: take it from version.txt (single source of truth) ----------
+echo [5/7] Applying version from version.txt...
+call node scripts\sync-version.mjs || goto :error
+REM Capture the version for the portable's exact filename (Ampwin <ver>.exe).
+set "APPVER="
+if exist "version.txt" set /p APPVER=<version.txt
+
 REM --- Build (electron-vite compile + electron-builder package) ------------
-echo [5/6] Building ^(electron-vite + electron-builder, ~1-2 min^)...
+echo [6/7] Building ^(electron-vite + electron-builder, ~1-2 min^)...
 call npm run dist || goto :error
 
 REM --- Deliver just the installers to dist-installer -----------------------
-echo [6/6] Copying installers to dist-installer...
+echo [7/7] Copying installers to dist-installer...
 if not exist "dist-installer" mkdir "dist-installer"
 del /q "dist-installer\*.exe"      >nul 2>nul
 del /q "dist-installer\*.blockmap" >nul 2>nul
@@ -56,15 +63,15 @@ echo.
 echo ============================================
 echo   Build complete
 echo ============================================
-for %%F in ("dist-installer\*portable.exe") do echo   Portable  : %%~fF
-for %%F in ("dist-installer\*Setup*.exe")    do echo   Installer : %%~fF
+echo   Portable  : %CD%\dist-installer\Ampwin %APPVER%.exe
+for %%F in ("dist-installer\*Installer*.exe")    do echo   Installer : %%~fF
 echo   ^(folder build: %CD%\dist-build\win-unpacked\Ampwin.exe^)
 echo.
 
 REM --- Launch the PORTABLE (extracts to %TEMP%; does NOT lock the build
 REM     output, so the next build won't be blocked). -------------------------
 echo Launching portable...
-for %%F in ("dist-installer\*portable.exe") do start "" "%%~fF"
+start "" "dist-installer\Ampwin %APPVER%.exe"
 
 endlocal
 exit /b 0

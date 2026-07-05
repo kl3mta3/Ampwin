@@ -363,10 +363,12 @@
     dragFrom = -1
   })
 
-  listEl.addEventListener('contextmenu', (e) => {
+  listEl.addEventListener('contextmenu', async (e) => {
     const row = e.target.closest('.pl-row')
     if (!row) return
     e.preventDefault()
+    const mx = e.clientX
+    const my = e.clientY
     const i = Number(row.dataset.i)
     // right-clicking outside the selection re-targets it
     if (!selected.has(i)) {
@@ -383,6 +385,21 @@
       { label: '▶ Play', action: () => ampwin.playlist.playIndex(i) },
       { label: '⏭ Play next', action: () => ampwin.playlist.queueNext(i) }
     ]
+    // Add the selected track(s) to an existing saved playlist.
+    const savedPls = await ampwin.playlist.saved.list()
+    if (savedPls.length > 0) {
+      const selTracks = [...selected].map((n) => tracks[n]).filter(Boolean)
+      menu.push({
+        label: '➕ Add to playlist',
+        submenu: savedPls.map((p) => ({
+          label: `${p.name} (${p.trackCount})`,
+          action: async () => {
+            await ampwin.playlist.saved.addTracksTo(p.id, selTracks)
+            $('title-text').textContent = `➕ added ${selTracks.length} to “${p.name}”`
+          }
+        }))
+      })
+    }
     if (remoteIdx.length > 0) {
       const dl = (kind) => downloadSelection(remoteIdx, kind)
       const n = remoteIdx.length > 1 ? ` (${remoteIdx.length})` : ''
@@ -400,6 +417,18 @@
     if (t && !t.isRemote && !t.missing && !t.unreadable) {
       menu.push({ label: '🔄 Convert…', action: () => openConvert(t) })
     }
+    // Addon-contributed entries (e.g. Demucs ▸ Get stems) for local files.
+    if (t) {
+      for (const ext of ampwin.menus.listTrackMenus(t)) {
+        menu.push({
+          label: ext.label,
+          submenu: ext.items.map((it) => ({
+            label: it.label,
+            action: () => ampwin.menus.invokeTrackMenu(ext.key, it.key, t)
+          }))
+        })
+      }
+    }
     menu.push({
       label: many ? `✕ Remove ${selected.size} tracks` : '✕ Remove from list',
       action: () => {
@@ -407,7 +436,7 @@
         selected.clear()
       }
     })
-    showMenu(e.clientX, e.clientY, menu)
+    showMenu(mx, my, menu)
   })
 
   // Download the given playlist indices (remote tracks) one at a time,
@@ -517,11 +546,21 @@
     }
   }
 
-  $('btn-add-files').addEventListener('click', async () => {
+  async function addFiles() {
     addAndMaybePlay(await ampwin.files.openFilesDialog())
-  })
-  $('btn-add-folder').addEventListener('click', async () => {
+  }
+  async function addFolder() {
     addAndMaybePlay(await ampwin.files.openFolderDialog())
+  }
+  // Single "＋" button → a small menu of the add sources.
+  $('btn-add-menu').addEventListener('click', (e) => {
+    e.stopPropagation()
+    const b = e.currentTarget.getBoundingClientRect()
+    showMenu(b.left, b.top, [
+      { label: '+ files…', action: () => addFiles() },
+      { label: '+ folder…', action: () => addFolder() },
+      { label: '+ link…', action: () => openAddLink() }
+    ])
   })
   $('btn-remove').addEventListener('click', () => {
     if (selected.size) ampwin.playlist.removeIndices([...selected])
@@ -537,48 +576,179 @@
     if (paths.length) ampwin.files.openPaths(paths)
   })
 
-  $('btn-import').addEventListener('click', () => ampwin.playlist.saved.importFromFile())
-  $('btn-export').addEventListener('click', () => ampwin.playlist.saved.exportToFile('m3u8'))
-
   // ---- saved playlists ---------------------------------------------------------
 
-  const savedSel = $('sel-saved')
-
-  async function refreshSaved() {
-    const items = await ampwin.playlist.saved.list()
-    savedSel.textContent = ''
-    const first = document.createElement('option')
-    first.value = ''
-    first.textContent = 'load…'
-    savedSel.appendChild(first)
-    for (const it of items) {
-      const opt = document.createElement('option')
-      opt.value = it.id
-      opt.textContent = `${it.name} (${it.trackCount})`
-      savedSel.appendChild(opt)
-    }
+  // Which saved playlist (if any) is currently "open" — drives save behavior.
+  let currentPlaylistId = null
+  let currentPlaylistName = null
+  function setCurrentPlaylist(id, name) {
+    currentPlaylistId = id
+    currentPlaylistName = name || null
+    $('pl-current').textContent = name || ''
+    $('btn-playlist-menu').title = id
+      ? `Playlist “${name}” — new, save, load, import, export`
+      : 'Playlists: new, save, load, import, export'
   }
 
-  savedSel.addEventListener('change', async () => {
-    if (savedSel.value) {
-      await ampwin.playlist.saved.load(savedSel.value)
-      savedSel.value = ''
-    }
-  })
+  // Generic confirm dialog → resolves true/false.
+  function confirmDialog(title, msg, okLabel) {
+    return new Promise((resolve) => {
+      $('confirm-title').textContent = title
+      $('confirm-msg').textContent = msg
+      $('confirm-ok').textContent = okLabel || 'ok'
+      $('confirm-modal').hidden = false
+      const finish = (val) => {
+        $('confirm-modal').hidden = true
+        $('confirm-ok').removeEventListener('click', onOk)
+        $('confirm-cancel').removeEventListener('click', onCancel)
+        resolve(val)
+      }
+      const onOk = () => finish(true)
+      const onCancel = () => finish(false)
+      $('confirm-ok').addEventListener('click', onOk)
+      $('confirm-cancel').addEventListener('click', onCancel)
+    })
+  }
 
-  $('btn-save').addEventListener('click', () => {
+  // New empty playlist — clears tracks and forgets the active saved playlist,
+  // so the next save asks for a name.
+  function doNewPlaylist() {
+    ampwin.playlist.clear()
+    setCurrentPlaylist(null, null)
+  }
+
+  // Save: in an open playlist → overwrite it silently; otherwise ask for a name
+  // (and warn if that name already exists).
+  async function doSavePlaylist() {
+    if (ampwin.playlist.getTracks().length === 0) {
+      $('title-text').textContent = 'nothing to save — add some tracks first'
+      return
+    }
+    if (currentPlaylistId) {
+      await ampwin.playlist.saved.saveCurrentAs(currentPlaylistName, currentPlaylistId)
+      $('title-text').textContent = `✓ saved “${currentPlaylistName}”`
+      return
+    }
     $('save-name').value = ''
     $('save-modal').hidden = false
     $('save-name').focus()
-  })
+  }
   $('save-cancel').addEventListener('click', () => ($('save-modal').hidden = true))
+  $('save-name').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $('save-ok').click()
+  })
   $('save-ok').addEventListener('click', async () => {
     const name = $('save-name').value.trim()
-    if (name) {
-      await ampwin.playlist.saved.saveCurrentAs(name)
-      await refreshSaved()
-    }
     $('save-modal').hidden = true
+    if (!name) return
+    const existing = (await ampwin.playlist.saved.list()).find(
+      (p) => p.name.toLowerCase() === name.toLowerCase()
+    )
+    let overwriteId
+    if (existing) {
+      const ok = await confirmDialog(
+        'Playlist already exists',
+        `A saved playlist named “${name}” already exists. Save over it?`,
+        'overwrite'
+      )
+      if (!ok) return
+      overwriteId = existing.id
+    }
+    const id = await ampwin.playlist.saved.saveCurrentAs(name, overwriteId)
+    setCurrentPlaylist(id, name)
+    $('title-text').textContent = `✓ saved “${name}”`
+  })
+
+  // Load: a custom dropdown panel (a native <select> can't do per-row
+  // right-click / delete). Left-click a row to load; ✕ or right-click to delete.
+  let loadPanel = null
+  function closeLoadPanel() {
+    loadPanel?.remove()
+    loadPanel = null
+  }
+  document.addEventListener('click', closeLoadPanel)
+
+  async function deleteSaved(item) {
+    // Close the panel first so the confirm dialog isn't behind it, reopen after.
+    const wasOpen = !!loadPanel
+    closeLoadPanel()
+    const ok = await confirmDialog(
+      'Delete playlist',
+      `Delete the saved playlist “${item.name}”? This can’t be undone.`,
+      'delete'
+    )
+    if (ok) {
+      await ampwin.playlist.saved.delete(item.id)
+      if (currentPlaylistId === item.id) setCurrentPlaylist(null, null)
+    }
+    if (wasOpen) openLoadPanel()
+  }
+
+  async function openLoadPanel() {
+    closeLoadPanel()
+    const items = await ampwin.playlist.saved.list()
+    loadPanel = document.createElement('div')
+    loadPanel.id = 'pl-load-panel'
+    loadPanel.addEventListener('click', (e) => e.stopPropagation())
+    if (items.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'pl-load-empty'
+      empty.textContent = 'no saved playlists'
+      loadPanel.appendChild(empty)
+    } else {
+      for (const it of items) {
+        const row = document.createElement('div')
+        row.className = 'pl-load-row'
+        const name = document.createElement('span')
+        name.className = 'pl-load-name'
+        name.textContent = it.name
+        const count = document.createElement('span')
+        count.className = 'pl-load-count'
+        count.textContent = it.trackCount
+        const del = document.createElement('span')
+        del.className = 'pl-load-del'
+        del.textContent = '✕'
+        del.title = `Delete “${it.name}”`
+        del.addEventListener('click', (e) => {
+          e.stopPropagation()
+          deleteSaved(it)
+        })
+        row.addEventListener('contextmenu', (e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          deleteSaved(it)
+        })
+        row.addEventListener('click', async () => {
+          closeLoadPanel()
+          await ampwin.playlist.saved.load(it.id)
+          setCurrentPlaylist(it.id, it.name)
+        })
+        row.append(name, count, del)
+        loadPanel.appendChild(row)
+      }
+    }
+    document.body.appendChild(loadPanel)
+    // Anchor to the playlist menu button; open upward if there's no room below.
+    const b = $('btn-playlist-menu').getBoundingClientRect()
+    const ph = loadPanel.offsetHeight
+    const top = b.top - ph - 4 > 4 ? b.top - ph - 4 : b.bottom + 4
+    loadPanel.style.left = Math.min(b.left, window.innerWidth - loadPanel.offsetWidth - 4) + 'px'
+    loadPanel.style.top = top + 'px'
+  }
+  // Bottom "☰ playlist ▾" dropdown — groups new/save/load/import/export in one
+  // place (Load opens the same panel as before, with per-row delete).
+  $('btn-playlist-menu').addEventListener('click', (e) => {
+    e.stopPropagation()
+    if (loadPanel) closeLoadPanel()
+    const b = e.currentTarget.getBoundingClientRect()
+    showMenu(b.left, b.top, [
+      { label: 'Import…', action: () => ampwin.playlist.saved.importFromFile() },
+      { label: 'Export…', action: () => ampwin.playlist.saved.exportToFile('m3u8') },
+      { label: 'New', action: () => doNewPlaylist() },
+      { label: 'Save', action: () => doSavePlaylist() },
+      // Defer so the click that opened the menu doesn't immediately close the panel.
+      { label: 'Load…', action: () => setTimeout(openLoadPanel, 0) }
+    ])
   })
 
   // ---- add link / YouTube ------------------------------------------------------
@@ -605,7 +775,7 @@
   const isPlaylistLink = (url) =>
     /youtube\.com|youtu\.be/i.test(url) && (/[?&]list=/.test(url) || /\/playlist\b/.test(url))
 
-  $('btn-add-link').addEventListener('click', async () => {
+  async function openAddLink() {
     $('link-url').value = ''
     $('link-audio').checked = false
     $('link-status').textContent = ''
@@ -613,7 +783,7 @@
     $('link-url').focus()
     // reflect current sign-in state on the button
     $('link-signin-btn').textContent = (await ampwin.links.isYouTubeSignedIn()) ? '✓ signed in' : 'sign in'
-  })
+  }
   $('link-cancel').addEventListener('click', () => ($('link-modal').hidden = true))
 
   async function submitLink(url, audioOnly, statusEl) {
@@ -741,7 +911,8 @@
       { label: '⏭ Next preset', action: () => ampwin.visualizer.nextPreset() }
     ])
   })
-  $('btn-fullscreen').addEventListener('click', () => ampwin.visualizer.setFullscreen(true))
+  // Fullscreen has no dedicated button — double-click the visualizer or use its
+  // right-click menu.
   $('btn-pl-popout').addEventListener('click', () => ampwin.playlist.popOut())
 
   // System-audio mode: visualize whatever the whole computer is playing.
@@ -760,6 +931,167 @@
       : 'Visualize system audio — Spotify, a browser, any app'
   })
   sysBtn.classList.toggle('on', ampwin.system.isEnabled())
+
+  // Lyrics overlay: on when the toggle is enabled; dimmed when the current song
+  // has no lyrics to show.
+  const lyricsBtn = $('btn-lyrics')
+  function reflectLyrics() {
+    const on = ampwin.lyrics.isEnabled()
+    const avail = ampwin.lyrics.isAvailable()
+    lyricsBtn.classList.toggle('on', on)
+    lyricsBtn.classList.toggle('dim', !avail)
+    lyricsBtn.title = !avail
+      ? 'Lyrics — this song has none embedded (or no .lrc next to it)'
+      : on
+        ? 'Lyrics ON — showing over the visualizer. Click to hide.'
+        : 'Show lyrics over the visualizer'
+  }
+  lyricsBtn.addEventListener('click', () => ampwin.lyrics.setEnabled(!ampwin.lyrics.isEnabled()))
+  ampwin.lyrics.on('change', reflectLyrics)
+  ampwin.lyrics.on('available', reflectLyrics)
+  reflectLyrics()
+
+  // ---- Equalizer -----------------------------------------------------------
+  const eqBtn = $('btn-eq')
+  eqBtn.classList.toggle('on', ampwin.eq.isEnabled())
+  eqBtn.addEventListener('click', openEqWindow)
+
+  let eqWin = null
+  const EQ_PRESETS = {
+    Flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    Rock: [5, 4, 3, 1, -1, -1, 1, 3, 4, 5],
+    Pop: [-1, 2, 4, 4, 2, -1, -2, -2, -1, -1],
+    Jazz: [4, 3, 1, 2, -1, -1, 0, 1, 3, 4],
+    Classical: [5, 4, 3, 2, -1, -1, 0, 2, 3, 4],
+    Dance: [6, 5, 2, 0, -1, -2, -2, 0, 3, 5],
+    'Bass Boost': [7, 6, 5, 3, 1, 0, 0, 0, 0, 0],
+    'Treble Boost': [0, 0, 0, 0, 0, 1, 3, 5, 6, 7],
+    Vocal: [-2, -3, -2, 1, 4, 4, 3, 1, -1, -2],
+    Loudness: [6, 4, 0, 0, -2, 0, 0, -1, 4, 6]
+  }
+  const eqFmtFreq = (f) => (f >= 1000 ? f / 1000 + 'k' : String(f))
+  const eqFmtDb = (db) => (db > 0 ? '+' + db : String(db))
+
+  const EQ_CSS = `
+    * { margin: 0; box-sizing: border-box; font-family: 'Segoe UI', sans-serif; user-select: none; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #101318; color: #cfd4dd; }
+    body { display: flex; flex-direction: column; }
+    #bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+           background: linear-gradient(#20242c, #14171d); border-bottom: 1px solid #000; -webkit-app-region: drag; }
+    #logo { font-size: 10px; font-weight: bold; letter-spacing: 2px; color: #3fdf6f; }
+    #bar label, #bar select, #bar button { -webkit-app-region: no-drag; }
+    #enable { font-size: 12px; display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    select, button { background: #1d222b; color: #cfd4dd; border: 1px solid #000; border-radius: 3px; padding: 3px 8px; font-size: 12px; cursor: pointer; }
+    button:hover, select:hover { background: #2a3140; }
+    #x:hover { background: #7f1f1f; }
+    .spacer { flex: 1; }
+    #eq-body { flex: 1; display: flex; align-items: stretch; justify-content: center; gap: 6px; padding: 10px 12px 6px; }
+    .col { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 40px; }
+    .col.pre { border-right: 1px solid #2a3140; padding-right: 8px; margin-right: 4px; width: 48px; }
+    .val { font-family: Consolas, monospace; font-size: 11px; color: #6fd88f; min-height: 14px; }
+    .vslider { writing-mode: vertical-lr; direction: rtl; width: 22px; flex: 1; accent-color: #3fae66; -webkit-app-region: no-drag; cursor: pointer; }
+    .lbl { font-size: 10px; color: #9aa1ac; }
+  `
+
+  function eqBandCol(id, label, value, range, cls) {
+    return (
+      `<div class="col ${cls || ''}">` +
+      `<div class="val" id="${id}-val">${eqFmtDb(value)}</div>` +
+      `<input class="vslider" type="range" id="${id}" min="${range.min}" max="${range.max}" step="1" value="${value}" />` +
+      `<div class="lbl">${label}</div>` +
+      `</div>`
+    )
+  }
+
+  function openEqWindow() {
+    if (eqWin && !eqWin.closed) {
+      eqWin.focus()
+      return
+    }
+    eqWin = window.open('about:blank', 'ampwin-eq')
+    if (!eqWin) return
+    const doc = eqWin.document
+    doc.title = 'Equalizer'
+    const style = doc.createElement('style')
+    style.textContent = EQ_CSS
+    doc.head.appendChild(style)
+    eqWin.resizeTo(600, 360)
+
+    const freqs = ampwin.eq.frequencies()
+    const range = ampwin.eq.range()
+    const gains = ampwin.eq.getGains()
+    let cols = eqBandCol('eq-pre', 'PRE', ampwin.eq.getPreamp(), range, 'pre')
+    for (let i = 0; i < freqs.length; i++) cols += eqBandCol('eq-b' + i, eqFmtFreq(freqs[i]), gains[i] ?? 0, range)
+
+    doc.body.innerHTML = `
+      <div id="bar">
+        <span id="logo">EQUALIZER</span>
+        <label id="enable"><input type="checkbox" id="eq-on" /> On</label>
+        <select id="eq-preset" title="Presets"></select>
+        <button id="eq-flat" title="Reset to flat">Flat</button>
+        <span class="spacer"></span>
+        <button id="x" title="Close">×</button>
+      </div>
+      <div id="eq-body">${cols}</div>`
+
+    const d = (id) => doc.getElementById(id)
+    const presetSel = d('eq-preset')
+    presetSel.innerHTML =
+      '<option value="">preset…</option>' +
+      Object.keys(EQ_PRESETS)
+        .map((n) => `<option>${n}</option>`)
+        .join('')
+
+    const onChk = d('eq-on')
+    onChk.checked = ampwin.eq.isEnabled()
+    onChk.addEventListener('change', () => {
+      ampwin.eq.setEnabled(onChk.checked)
+      eqBtn.classList.toggle('on', onChk.checked)
+    })
+
+    const setSlider = (id, db) => {
+      const el = d(id)
+      const val = d(id + '-val')
+      if (el) el.value = db
+      if (val) val.textContent = eqFmtDb(db)
+    }
+    const wire = (id, cb) => {
+      const el = d(id)
+      const val = d(id + '-val')
+      el.addEventListener('input', () => {
+        const db = Number(el.value)
+        val.textContent = eqFmtDb(db)
+        cb(db)
+      })
+    }
+
+    wire('eq-pre', (db) => ampwin.eq.setPreamp(db))
+    for (let i = 0; i < freqs.length; i++) {
+      wire('eq-b' + i, ((idx) => (db) => ampwin.eq.setGain(idx, db))(i))
+    }
+
+    presetSel.addEventListener('change', () => {
+      const arr = EQ_PRESETS[presetSel.value]
+      if (!arr) return
+      ampwin.eq.setGains(arr)
+      for (let i = 0; i < arr.length; i++) setSlider('eq-b' + i, arr[i])
+      // A preset is only audible with the EQ on — turn it on for the user.
+      if (!onChk.checked) {
+        onChk.checked = true
+        ampwin.eq.setEnabled(true)
+        eqBtn.classList.add('on')
+      }
+    })
+
+    d('eq-flat').addEventListener('click', () => {
+      ampwin.eq.reset()
+      setSlider('eq-pre', 0)
+      for (let i = 0; i < freqs.length; i++) setSlider('eq-b' + i, 0)
+      presetSel.value = ''
+    })
+
+    d('x').addEventListener('click', () => eqWin.close())
+  }
 
   const vizSel = $('sel-viz')
   function refreshVisualizers() {
@@ -1004,7 +1336,7 @@
 
   refreshVisualizers()
   refreshSkins()
-  refreshSaved()
+  setCurrentPlaylist(null, null)
 
   ampwin.ready()
 })()

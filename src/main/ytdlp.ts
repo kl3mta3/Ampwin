@@ -107,13 +107,37 @@ async function cookieArgs(): Promise<string[]> {
   }
 }
 
-async function runYtDlp(args: string[], timeoutMs = 60000): Promise<string> {
-  const bin = await ensureYtDlp()
+// Forcing the android player client dodges YouTube's web PO-token / SABR wall
+// (the "Requested format is not available" failures) and most bot checks,
+// without cookies. Kept as a fallback rather than the default because the
+// normal client is faster and works for the majority.
+const ANDROID_CLIENT = ['--extractor-args', 'youtube:player_client=default,android']
+
+/** Ordered arg-prefixes to try when a YouTube extraction fails, most-specific
+ *  first. Cookies help age/region-locked videos but can trigger SABR-only
+ *  responses that break format selection; the android client sidesteps the
+ *  PO-token/bot wall. A video that fails every tier is genuinely unavailable
+ *  (real DRM, private, region-blocked) — no client can fetch those. */
+async function ytFallbackPrefixes(): Promise<string[][]> {
   const cookies = await cookieArgs()
+  const prefixes: string[][] = []
+  // Android client first. `player_client=default,android` already tries the web
+  // client and falls through to android in a SINGLE spawn, and android succeeds
+  // on VEVO / official-music videos where the web client now returns "not
+  // available" (PO-token / SABR wall). Trying a web-only pass first wasted ~2.5s
+  // per switch on those before falling through to android anyway — the main cause
+  // of the slow video switch. This one prefix covers the common case in one go.
+  prefixes.push(ANDROID_CLIENT)
+  if (cookies.length) prefixes.push(cookies) // signed-in: age/region-locked
+  prefixes.push([]) // cookieless web client — last resort
+  return prefixes
+}
+
+function runYtDlpOnce(bin: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       bin,
-      ['--no-warnings', '--no-playlist', ...cookies, ...args],
+      ['--no-warnings', '--no-playlist', ...args],
       { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || err.message).trim().split('\n').slice(-3).join(' ').slice(-400)))
@@ -121,6 +145,20 @@ async function runYtDlp(args: string[], timeoutMs = 60000): Promise<string> {
       }
     )
   })
+}
+
+async function runYtDlp(args: string[], timeoutMs = 60000): Promise<string> {
+  const bin = await ensureYtDlp()
+  const prefixes = await ytFallbackPrefixes()
+  let lastErr: Error | undefined
+  for (const pre of prefixes) {
+    try {
+      return await runYtDlpOnce(bin, [...pre, ...args], timeoutMs)
+    } catch (err) {
+      lastErr = err as Error
+    }
+  }
+  throw lastErr ?? new Error('yt-dlp failed')
 }
 
 /** Best-effort background self-update; ignored on failure. */
@@ -264,55 +302,85 @@ export async function downloadLink(
   onProgress?: (percent: number, phase: string) => void
 ): Promise<string> {
   const bin = await ensureYtDlp()
-  const cookies = await cookieArgs()
   await fsp.mkdir(downloadsDir(), { recursive: true })
   const ffDir = dirname(ffmpegPath())
   const outTemplate = join(downloadsDir(), '%(title).150B [%(id)s].%(ext)s')
 
-  const args = [
-    '--no-warnings',
-    '--no-playlist',
-    '--newline', // progress on its own lines (stderr)
-    '--ffmpeg-location',
-    ffDir,
-    ...cookies
-  ]
-  if (kind === 'audio') {
-    args.push('-f', 'bestaudio[ext=m4a]/bestaudio/best', '-x', '--audio-format', 'm4a')
-  } else if (kind === 'video') {
-    args.push('-f', 'bestvideo[ext=mp4]/bestvideo/best')
-  } else {
-    args.push('-f', 'bestvideo*+bestaudio/best', '--merge-output-format', 'mp4')
+  const buildArgs = (prefix: string[]): string[] => {
+    const args = [
+      '--no-warnings',
+      '--no-playlist',
+      '--newline', // progress on its own lines (stderr)
+      // ASCII-only filenames. yt-dlp otherwise substitutes fullwidth look-alikes
+      // for Windows-illegal chars (" → ＂, / → ⧸); those non-ASCII chars get
+      // mangled when yt-dlp prints the final path back on stdout (Python's
+      // errors='replace' → '?'), so the path we store no longer matches the file
+      // on disk and the track shows as "missing". ASCII names round-trip cleanly
+      // and are easier to find in Explorer.
+      '--restrict-filenames',
+      '--ffmpeg-location',
+      ffDir,
+      ...prefix
+    ]
+    if (kind === 'audio') {
+      args.push('-f', 'bestaudio[ext=m4a]/bestaudio/best', '-x', '--audio-format', 'm4a')
+    } else if (kind === 'video') {
+      args.push('-f', 'bestvideo[ext=mp4]/bestvideo/best')
+    } else {
+      args.push('-f', 'bestvideo*+bestaudio/best', '--merge-output-format', 'mp4')
+    }
+    // --print after_move:filepath → the final path on stdout (progress on stderr)
+    args.push('-o', outTemplate, '--no-simulate', '--print', 'after_move:filepath', url)
+    return args
   }
-  // --print after_move:filepath → the final path on stdout (progress is on stderr)
-  args.push('-o', outTemplate, '--no-simulate', '--print', 'after_move:filepath', url)
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn(bin, args, { windowsHide: true })
-    let stdout = ''
-    let errTail = ''
-    proc.stdout.on('data', (d: Buffer) => (stdout += d.toString()))
-    proc.stderr.on('data', (d: Buffer) => {
-      const s = d.toString()
-      errTail = (errTail + s).slice(-3000)
-      const m = /\[download\]\s+([\d.]+)%/.exec(s)
-      if (m) onProgress?.(parseFloat(m[1]), 'downloading')
-      else if (/\[Merger\]/.test(s)) onProgress?.(99, 'merging')
-      else if (/\[ExtractAudio\]/.test(s)) onProgress?.(99, 'extracting audio')
+  const attempt = (args: string[]): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const proc = spawn(bin, args, { windowsHide: true })
+      let stdout = ''
+      let errTail = ''
+      proc.stdout.on('data', (d: Buffer) => (stdout += d.toString()))
+      proc.stderr.on('data', (d: Buffer) => {
+        const s = d.toString()
+        errTail = (errTail + s).slice(-3000)
+        const m = /\[download\]\s+([\d.]+)%/.exec(s)
+        if (m) onProgress?.(parseFloat(m[1]), 'downloading')
+        else if (/\[Merger\]/.test(s)) onProgress?.(99, 'merging')
+        else if (/\[ExtractAudio\]/.test(s)) onProgress?.(99, 'extracting audio')
+      })
+      proc.on('error', reject)
+      proc.on('close', (code) => {
+        if (code === 0) {
+          const path = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || ''
+          if (path) {
+            // Guard against a mangled path (see --restrict-filenames note): only
+            // hand back a path that actually exists, so we never add a phantom
+            // "missing" track to the playlist.
+            fsp
+              .access(path)
+              .then(() => {
+                onProgress?.(100, 'done')
+                resolve(path)
+              })
+              .catch(() =>
+                reject(new Error(`download finished but the file wasn't found at the reported path: ${path}`))
+              )
+          } else reject(new Error('download finished but no output path was reported'))
+        } else {
+          reject(new Error(errTail.trim().split('\n').slice(-3).join(' ').slice(-400)))
+        }
+      })
     })
-    proc.on('error', reject)
-    proc.on('close', (code) => {
-      if (code === 0) {
-        const path = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || ''
-        if (path) {
-          onProgress?.(100, 'done')
-          resolve(path)
-        } else reject(new Error('download finished but no output path was reported'))
-      } else {
-        reject(new Error(errTail.trim().split('\n').slice(-3).join(' ').slice(-400)))
-      }
-    })
-  })
+
+  let lastErr: Error | undefined
+  for (const pre of await ytFallbackPrefixes()) {
+    try {
+      return await attempt(buildArgs(pre))
+    } catch (err) {
+      lastErr = err as Error
+    }
+  }
+  throw lastErr ?? new Error('download failed')
 }
 
 export async function searchYouTube(query: string, count = 15): Promise<YtSearchResult[]> {
@@ -339,18 +407,27 @@ export async function searchYouTube(query: string, count = 15): Promise<YtSearch
 
 async function runPlaylistDump(url: string, max: number): Promise<string> {
   const bin = await ensureYtDlp()
-  const cookies = await cookieArgs()
-  return new Promise((resolve, reject) => {
-    execFile(
-      bin,
-      ['--no-warnings', '--yes-playlist', '--flat-playlist', '-J', '-I', `1:${max}`, ...cookies, url],
-      { timeout: 90000, maxBuffer: 128 * 1024 * 1024, windowsHide: true },
-      (err, stdout, stderr) => {
-        if (err) reject(new Error((stderr || err.message).trim().split('\n').slice(-3).join(' ').slice(-400)))
-        else resolve(stdout)
-      }
-    )
-  })
+  const once = (extra: string[]): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile(
+        bin,
+        ['--no-warnings', '--yes-playlist', '--flat-playlist', '-J', '-I', `1:${max}`, ...extra, url],
+        { timeout: 90000, maxBuffer: 128 * 1024 * 1024, windowsHide: true },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error((stderr || err.message).trim().split('\n').slice(-3).join(' ').slice(-400)))
+          else resolve(stdout)
+        }
+      )
+    })
+  let lastErr: Error | undefined
+  for (const pre of await ytFallbackPrefixes()) {
+    try {
+      return await once(pre)
+    } catch (err) {
+      lastErr = err as Error
+    }
+  }
+  throw lastErr ?? new Error('playlist expand failed')
 }
 
 function parsePlaylistEntries(out: string): YtSearchResult[] {

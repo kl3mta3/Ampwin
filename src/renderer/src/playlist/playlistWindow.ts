@@ -7,6 +7,7 @@
 
 import type { PlayerController } from './controller'
 import type { Track } from '../../../shared/types'
+import type { TrackMenuRegistry } from '../skin/menuRegistry'
 import { native } from '../native'
 
 const STYLE = `
@@ -41,6 +42,15 @@ const STYLE = `
   .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
   .dur { color: #7a8090; }
   .empty { padding: 14px; text-align: center; color: #7a8090; }
+  .ctx { position: fixed; z-index: 100; background: #1a1e26; border: 1px solid #000; border-radius: 4px;
+         box-shadow: 0 6px 20px rgba(0,0,0,.6); padding: 4px; min-width: 170px;
+         font-family: 'Segoe UI', sans-serif; font-size: 12px; }
+  .ctx .mi { display: flex; justify-content: space-between; gap: 14px; padding: 6px 10px;
+             border-radius: 3px; cursor: pointer; white-space: nowrap; color: #cfd4dd; }
+  .ctx .mi:hover { background: #2d9f57; color: #fff; }
+  .ctx .mi .arr { color: #7a8090; }
+  .ctx .mi:hover .arr { color: #fff; }
+  .ctx .sep { height: 1px; background: #333; margin: 4px 2px; }
 `
 
 function fmt(sec: number): string {
@@ -48,17 +58,25 @@ function fmt(sec: number): string {
   return `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`
 }
 
+type MenuItem = 'sep' | { label: string; action?: () => void; submenu?: MenuItem[] }
+
 export class PlaylistWindow {
   private controller: PlayerController
+  private trackMenus: TrackMenuRegistry
   private win: Window | null = null
   private watch: number | null = null
   private unsubs: (() => void)[] = []
   private filter = ''
   private selected = new Set<number>()
   private dragFrom = -1
+  private menuPanels: HTMLElement[] = []
+  private menuOutside: ((e: Event) => void) | null = null
+  private busyStatus: string | null = null
+  private statusTimer: number | null = null
 
-  constructor(controller: PlayerController) {
+  constructor(controller: PlayerController, trackMenus: TrackMenuRegistry) {
     this.controller = controller
+    this.trackMenus = trackMenus
   }
 
   isOpen(): boolean {
@@ -123,6 +141,18 @@ export class PlaylistWindow {
         this.controller.model.removeIndices([...this.selected])
         this.selected.clear()
       }
+    })
+    listEl.addEventListener('contextmenu', (e) => {
+      const ev = e as MouseEvent
+      const row = (ev.target as HTMLElement).closest('.row') as HTMLElement | null
+      if (!row) return
+      ev.preventDefault()
+      const i = Number(row.dataset.i)
+      if (!this.selected.has(i)) {
+        this.selected = new Set([i])
+        this.paintSelection()
+      }
+      void this.openContextMenu(ev.clientX, ev.clientY, i)
     })
 
     // drag to reorder
@@ -235,13 +265,250 @@ export class PlaylistWindow {
       empty.textContent = tracks.length === 0 ? 'playlist empty' : 'no matches'
       listEl.appendChild(empty)
     }
-    countEl.textContent = `${tracks.length} track${tracks.length === 1 ? '' : 's'}`
+    countEl.textContent = this.busyStatus ?? `${tracks.length} track${tracks.length === 1 ? '' : 's'}`
     const cur = listEl.querySelector('.cur') as HTMLElement | null
     if (cur) cur.scrollIntoView({ block: 'nearest' })
   }
 
+  private async openContextMenu(x: number, y: number, i: number): Promise<void> {
+    if (!this.win) return
+    const tracks = this.controller.model.getTracks()
+    const track = tracks[i]
+    if (!track) return
+    const many = this.selected.size > 1
+    // Download applies to the remote (link) tracks in the selection.
+    const remoteIdx = [...this.selected].filter((n) => tracks[n] && tracks[n].isRemote)
+
+    const items: MenuItem[] = [
+      { label: '▶ Play', action: () => void this.controller.playIndex(i) },
+      { label: '⏭ Play next', action: () => this.controller.model.queueNext(i) }
+    ]
+
+    // Add the selected track(s) to an existing saved playlist.
+    const saved = await this.controller.listSavedPlaylists().catch(() => [])
+    if (!this.win) return // window may have closed during the await
+    if (saved.length) {
+      const sel = this.selected.has(i) ? [...this.selected] : [i]
+      const selTracks = sel.map((n) => tracks[n]).filter(Boolean)
+      items.push({
+        label: '➕ Add to playlist',
+        submenu: saved.map((p) => ({
+          label: `${p.name} (${p.trackCount})`,
+          action: () => {
+            void this.controller.addTracksToSavedPlaylist(p.id, selTracks)
+            this.setStatus(`➕ added ${selTracks.length} to “${p.name}”`, true)
+          }
+        }))
+      })
+    }
+
+    if (remoteIdx.length > 0) {
+      const n = remoteIdx.length > 1 ? ` (${remoteIdx.length})` : ''
+      items.push({
+        label: '⬇ Download' + n,
+        submenu: [
+          { label: 'Audio (.m4a)', action: () => void this.runDownload(remoteIdx, 'audio') },
+          { label: 'Video (no audio)', action: () => void this.runDownload(remoteIdx, 'video') },
+          { label: 'Audio + Video (.mp4)', action: () => void this.runDownload(remoteIdx, 'both') }
+        ]
+      })
+    }
+
+    // Convert applies to a single local, readable file.
+    if (!track.isRemote && !track.missing && !track.unreadable) {
+      const formats = await native.invoke('convert:list', !!track.isVideo).catch(() => [])
+      if (!this.win) return // window may have closed during the await
+      if (formats.length) {
+        items.push({
+          label: '🔄 Convert…',
+          submenu: formats.map((f) => ({
+            label: f.label,
+            action: () => void this.runConvert(track, f.id)
+          }))
+        })
+      }
+    }
+
+    // Addon-provided context menus (stems, karaokefy, etc.) for local files.
+    for (const menu of this.trackMenus.list(track)) {
+      items.push({
+        label: menu.label,
+        submenu: menu.items.map((it) => ({
+          label: it.label,
+          action: () => void this.trackMenus.invoke(menu.key, it.key, track)
+        }))
+      })
+    }
+
+    items.push('sep')
+    items.push({
+      label: many ? `✕ Remove ${this.selected.size} tracks` : '✕ Remove from list',
+      action: () => {
+        const idx = this.selected.has(i) ? [...this.selected] : [i]
+        this.controller.model.removeIndices(idx)
+        this.selected.clear()
+      }
+    })
+    this.showMenu(x, y, items)
+  }
+
+  // Download the given remote playlist indices one at a time, showing progress
+  // in the top count bar. Mirrors the default skin's downloadSelection().
+  private async runDownload(indices: number[], kind: 'audio' | 'video' | 'both'): Promise<void> {
+    const tracks = this.controller.model.getTracks()
+    const targets = indices.map((n) => tracks[n]).filter((t) => t && t.isRemote)
+    if (!targets.length) return
+    const off = native.on('evt:download-progress', ({ percent, phase }) =>
+      this.setStatus(`⬇ ${phase} ${Math.round(percent)}%`)
+    )
+    let done = 0
+    for (const t of targets) {
+      this.setStatus(`⬇ downloading “${t.title}”…`)
+      const local = await this.controller.downloadTrack(t, kind)
+      if (local) done++
+    }
+    off()
+    this.setStatus(`✓ downloaded ${done}/${targets.length}`, true)
+  }
+
+  private async runConvert(track: Track, formatId: string): Promise<void> {
+    const off = native.on('evt:convert-progress', ({ percent }) =>
+      this.setStatus(`🔄 converting ${Math.round(percent)}%`)
+    )
+    this.setStatus(`🔄 converting “${track.title}”…`)
+    try {
+      await this.controller.convertTrack(track, formatId)
+      this.setStatus('✓ converted → downloads/Converted', true)
+    } catch {
+      this.setStatus('✗ convert failed', true)
+    } finally {
+      off()
+    }
+  }
+
+  // Show a transient message in the top count bar; render() honours busyStatus so
+  // playlist updates mid-operation don't clobber it. autoClear reverts after 4s.
+  private setStatus(msg: string, autoClear = false): void {
+    if (!this.win) return
+    this.busyStatus = msg
+    const el = this.win.document.getElementById('count')
+    if (el) el.textContent = msg
+    if (this.statusTimer !== null) {
+      this.win.clearTimeout(this.statusTimer)
+      this.statusTimer = null
+    }
+    if (autoClear) {
+      this.statusTimer = this.win.setTimeout(() => {
+        this.busyStatus = null
+        this.statusTimer = null
+        this.render()
+      }, 4000)
+    }
+  }
+
+  private showMenu(x: number, y: number, items: MenuItem[]): void {
+    if (!this.win) return
+    this.closeMenu()
+    const doc = this.win.document
+    const root = this.buildMenuPanel(items, 0)
+    doc.body.appendChild(root)
+    this.placePanel(root, x, y)
+    const close = (e: Event): void => {
+      if (!this.menuPanels.some((p) => p.contains(e.target as Node))) this.closeMenu()
+    }
+    this.menuOutside = close
+    setTimeout(() => {
+      if (!this.win || this.menuOutside !== close) return
+      doc.addEventListener('mousedown', close)
+      doc.addEventListener('contextmenu', close)
+    }, 0)
+  }
+
+  private buildMenuPanel(items: MenuItem[], depth: number): HTMLElement {
+    const doc = this.win!.document
+    const panel = doc.createElement('div')
+    panel.className = 'ctx'
+    panel.dataset.depth = String(depth)
+    for (const it of items) {
+      if (it === 'sep') {
+        const sep = doc.createElement('div')
+        sep.className = 'sep'
+        panel.appendChild(sep)
+        continue
+      }
+      const el = doc.createElement('div')
+      el.className = 'mi'
+      const label = doc.createElement('span')
+      label.textContent = it.label
+      el.appendChild(label)
+      if (it.submenu) {
+        const arr = doc.createElement('span')
+        arr.className = 'arr'
+        arr.textContent = '▸'
+        el.appendChild(arr)
+        el.addEventListener('mouseenter', () => {
+          this.closeDeeperThan(depth)
+          const child = this.buildMenuPanel(it.submenu!, depth + 1)
+          doc.body.appendChild(child)
+          const pr = el.getBoundingClientRect()
+          const cr = child.getBoundingClientRect()
+          const vw = doc.documentElement.clientWidth
+          let left = pr.right - 2
+          if (left + cr.width > vw) left = Math.max(0, pr.left - cr.width + 2)
+          this.placePanel(child, left, pr.top)
+        })
+      } else if (it.action) {
+        const act = it.action
+        el.addEventListener('mouseenter', () => this.closeDeeperThan(depth))
+        el.addEventListener('click', () => {
+          this.closeMenu()
+          act()
+        })
+      }
+      panel.appendChild(el)
+    }
+    this.menuPanels.push(panel)
+    return panel
+  }
+
+  private placePanel(panel: HTMLElement, x: number, y: number): void {
+    const doc = this.win!.document
+    const r = panel.getBoundingClientRect()
+    const vw = doc.documentElement.clientWidth
+    const vh = doc.documentElement.clientHeight
+    panel.style.left = `${Math.max(0, Math.min(x, vw - r.width))}px`
+    panel.style.top = `${Math.max(0, Math.min(y, vh - r.height))}px`
+  }
+
+  private closeDeeperThan(depth: number): void {
+    this.menuPanels = this.menuPanels.filter((p) => {
+      if (Number(p.dataset.depth) > depth) {
+        p.remove()
+        return false
+      }
+      return true
+    })
+  }
+
+  private closeMenu(): void {
+    for (const p of this.menuPanels) p.remove()
+    this.menuPanels = []
+    const doc = this.win?.document
+    if (doc && this.menuOutside) {
+      doc.removeEventListener('mousedown', this.menuOutside)
+      doc.removeEventListener('contextmenu', this.menuOutside)
+    }
+    this.menuOutside = null
+  }
+
   private onClosed(): void {
     if (!this.win) return
+    this.closeMenu()
+    if (this.statusTimer !== null) {
+      this.win.clearTimeout(this.statusTimer)
+      this.statusTimer = null
+    }
+    this.busyStatus = null
     this.win = null
     if (this.watch !== null) {
       clearInterval(this.watch)

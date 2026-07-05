@@ -22,9 +22,16 @@
 import { app } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
+import { constants as osConstants, cpus, setPriority } from 'os'
 import { createWriteStream, existsSync, promises as fsp } from 'fs'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { net } from 'electron'
+
+// Leave the OS + UI CPU headroom so a separation doesn't lock up the whole
+// machine. Just under half the logical cores (min 1) keeps several cores free
+// for interactive work while still finishing in reasonable time; the GPU EPs
+// barely touch these. Combined with idle-class process priority below.
+const CPU_THREADS = Math.max(1, Math.floor((cpus().length || 4) / 2) - 1)
 import { ffmpegPath } from '../ffmpeg/paths'
 import { allowMediaPath, mediaUrlFor } from '../protocol'
 import type { StemModelPack, StemsProgress, StemsResult } from '../../shared/types'
@@ -45,8 +52,9 @@ function stemsCacheRoot(): string {
   return join(app.getPath('userData'), 'stems')
 }
 
-export function stemsExportDir(): string {
-  return join(app.getPath('userData'), 'downloads', 'Stems')
+export function stemsExportDir(subfolder = 'Stems'): string {
+  const safe = /^[A-Za-z0-9 _-]+$/.test(subfolder) ? subfolder : 'Stems'
+  return join(app.getPath('userData'), 'downloads', safe)
 }
 
 function validatePack(pack: StemModelPack): void {
@@ -64,7 +72,8 @@ function validatePack(pack: StemModelPack): void {
 // ---- model download ---------------------------------------------------------
 
 async function downloadFile(url: string, dest: string, onPct: (pct: number) => void): Promise<void> {
-  const res = await net.fetch(url)
+  // no-store: don't mirror multi-hundred-MB model files into Electron's HTTP cache.
+  const res = await net.fetch(url, { cache: 'no-store' })
   if (!res.ok || !res.body) throw new Error(`model download failed (HTTP ${res.status})`)
   const total = Number(res.headers.get('content-length')) || 0
   let received = 0
@@ -189,7 +198,12 @@ interface OrtModule {
   InferenceSession: {
     create(
       path: string,
-      opts: { executionProviders: string[]; graphOptimizationLevel?: string }
+      opts: {
+        executionProviders: string[]
+        graphOptimizationLevel?: string
+        intraOpNumThreads?: number
+        interOpNumThreads?: number
+      }
     ): Promise<{
       run(feeds: Record<string, unknown>): Promise<Record<string, { data: Float32Array; dims: readonly number[] }>>
       release?: () => Promise<void>
@@ -205,27 +219,49 @@ async function loadOrt(): Promise<OrtModule> {
   return ortModule
 }
 
+const EP_LABEL: Record<string, string> = {
+  cuda: 'GPU (CUDA)',
+  dml: 'GPU (DirectML)',
+  cpu: 'CPU'
+}
+
 async function createSession(
   ort: OrtModule,
   modelPath: string,
   useGpu: boolean
 ): Promise<{ session: Awaited<ReturnType<OrtModule['InferenceSession']['create']>>; provider: string }> {
-  if (useGpu) {
+  // GPU: DirectML (any Windows GPU, no install) → CPU. NOTE: onnxruntime-node's
+  // Windows binary does NOT include the CUDA execution provider ("[cuda] backend
+  // not found"), so CUDA can't be added by shipping DLLs — it would need a
+  // CUDA-enabled ORT build swapped in or a native/Python sidecar. Left out here
+  // to avoid a guaranteed-failing attempt on every model load.
+  const attempts = useGpu ? ['dml', 'cpu'] : ['cpu']
+  let lastErr: unknown
+  for (const ep of attempts) {
     try {
       const session = await ort.InferenceSession.create(modelPath, {
-        executionProviders: ['dml'],
-        graphOptimizationLevel: 'all'
+        executionProviders: [ep],
+        // Full optimization for every EP (verified: 'basic'/'disabled' on
+        // DirectML either error on ConvTranspose or device-hang; 'all' is the
+        // one that runs). On stable GPUs DirectML is a big win; on brand-new
+        // silicon (e.g. RTX 50-series) DirectML 1.15.4 has no optimized kernels
+        // yet — it's slower than CPU and device-hangs mid-run — so the runtime
+        // fallback below drops such a job to CPU.
+        graphOptimizationLevel: 'all',
+        // Cap CPU threads so a separation can't peg every core and lock up the
+        // machine (the responsiveness fix). ~2.7s/chunk at 8 threads.
+        intraOpNumThreads: CPU_THREADS,
+        interOpNumThreads: 1
       })
-      return { session, provider: 'GPU (DirectML)' }
+      return { session, provider: EP_LABEL[ep] }
     } catch (err) {
-      console.warn('DirectML session failed; falling back to CPU:', (err as Error).message)
+      lastErr = err
+      if (ep !== 'cpu') {
+        console.warn(`stems: ${ep} EP unavailable, trying next — ${(err as Error).message.slice(0, 120)}`)
+      }
     }
   }
-  const session = await ort.InferenceSession.create(modelPath, {
-    executionProviders: ['cpu'],
-    graphOptimizationLevel: 'all'
-  })
-  return { session, provider: 'CPU' }
+  throw lastErr
 }
 
 /** Triangular fade window for quarter-segment overlap-add (mirrors demucs). */
@@ -292,6 +328,17 @@ export async function separateTrack(
     if (job.cancelled) throw new Error('cancelled')
   }
 
+  // Run the (CPU-heavy) separation at the lowest (idle) priority class so Windows
+  // hands the CPU to interactive apps the instant they need it — the desktop,
+  // Chrome, a screen recorder etc. stay fully responsive. When nothing else wants
+  // the CPU the separation still runs at full speed. Only THIS (main) process
+  // drops — the renderer/UI stays at normal priority. Lowering needs no admin.
+  try {
+    setPriority(0, osConstants.priority.PRIORITY_LOW)
+  } catch {
+    /* best-effort */
+  }
+
   try {
     const modelPaths = await ensureModelPack(pack, onProgress)
     checkCancel()
@@ -332,7 +379,9 @@ export async function separateTrack(
     const mixData = new Float32Array(N_CHANNELS * N_SAMPLES)
 
     for (let r = 0; r < runs.length; r++) {
+      checkCancel() // before loading each (bag) model — abort during setup too
       let { session, provider } = await createSession(ort, runs[r].path, gpuUsable)
+      checkCancel()
       providerLabel = provider
       try {
         for (let i = 0; i < nChunks; i++) {
@@ -352,7 +401,7 @@ export async function separateTrack(
           } catch (err) {
             if (providerLabel === 'CPU') throw err
             console.warn('GPU inference failed; falling back to CPU:', (err as Error).message)
-            onProgress({ phase: 'separate', percent: Math.round((doneRuns / totalRuns) * 100), detail: 'GPU out of memory — switching to CPU' })
+            onProgress({ phase: 'separate', percent: Math.round((doneRuns / totalRuns) * 100), detail: 'GPU error — switching to CPU' })
             await session.release?.().catch(() => {})
             gpuUsable = false
             ;({ session, provider } = await createSession(ort, runs[r].path, false))
@@ -410,6 +459,11 @@ export async function separateTrack(
   } finally {
     running = false
     activeJobs.delete(opts.jobKey)
+    try {
+      setPriority(0, osConstants.priority.PRIORITY_NORMAL)
+    } catch {
+      /* best-effort */
+    }
   }
 }
 
@@ -421,11 +475,12 @@ export async function exportStem(
   wavPath: string,
   format: 'wav' | 'flac' | 'mp3',
   songName: string,
-  stemName: string
+  stemName: string,
+  subfolder = 'Stems'
 ): Promise<string> {
   if (!wavPath.startsWith(stemsCacheRoot())) throw new Error('not a stems cache file')
   const safeSong = songName.replace(/[<>:"/\\|?*]/g, '_').slice(0, 80) || 'song'
-  const dir = join(stemsExportDir(), safeSong)
+  const dir = join(stemsExportDir(subfolder), safeSong)
   await fsp.mkdir(dir, { recursive: true })
   const dest = join(dir, `${stemName}.${format}`)
 
@@ -445,4 +500,29 @@ export async function exportStem(
     proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(errTail.trim().slice(-200)))))
   })
   return dest
+}
+
+/** Sum several stem WAVs into one instrumental WAV beside them (karaokefy's
+ *  drums+bass+other → instrumental). `normalize=0` keeps original levels so the
+ *  sum matches the source mix. Returns the cached path + an ampwin:// URL. */
+export async function mixStems(wavPaths: string[], outName: string): Promise<{ path: string; url: string }> {
+  if (!wavPaths.length) throw new Error('no stems to mix')
+  for (const p of wavPaths) {
+    if (!p.startsWith(stemsCacheRoot())) throw new Error('not a stems cache file')
+    if (!existsSync(p)) throw new Error(`stem not found: ${p}`)
+  }
+  const safe = (outName || 'instrumental').replace(/[^A-Za-z0-9._-]/g, '_') || 'instrumental'
+  const outPath = join(dirname(wavPaths[0]), `${safe}.wav`)
+  const inputs = wavPaths.flatMap((p) => ['-i', p])
+  const filter = `amix=inputs=${wavPaths.length}:duration=longest:normalize=0`
+  const args = ['-y', '-v', 'error', ...inputs, '-filter_complex', filter, '-ac', '2', '-ar', String(SAMPLE_RATE), outPath]
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(ffmpegPath(), args, { windowsHide: true })
+    let errTail = ''
+    proc.stderr.on('data', (d: Buffer) => (errTail = (errTail + d.toString()).slice(-400)))
+    proc.on('error', reject)
+    proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`mix failed: ${errTail.trim().slice(-200)}`))))
+  })
+  allowMediaPath(outPath)
+  return { path: outPath, url: mediaUrlFor(outPath) }
 }

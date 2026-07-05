@@ -9,16 +9,19 @@
 //     where the visualizer would — mini view, pop-out window, or fullscreen.
 // The skin's canvas is used only as a positioning anchor (+ its own clicks).
 
-import type { PlayState, PresetInfo, Settings, VizCycleOptions } from '../../../shared/types'
+import type { Lyrics, PlayState, PresetInfo, Settings, VizCycleOptions } from '../../../shared/types'
 import { native } from '../native'
 import { Emitter } from '../emitter'
 import type { AudioGraph } from '../audio/graph'
 import { PluginRegistry, type VisualizerPlugin } from './plugin'
 import { createBarsPlugin } from './barsPlugin'
+import { createBlackScreenPlugin } from './blackScreenPlugin'
 import { createButterchurnPlugin, isButterchurnHandle } from './butterchurnPlugin'
+import { LyricsOverlay } from './lyricsOverlay'
 import { PresetCatalog } from './presets'
 import { VizSurface, type SurfaceMount } from './surface'
 import { VideoStreamPlayer } from '../audio/videoStream'
+import { EmbedPlayer } from './embedPlayer'
 
 const DEFAULT_BLEND_SEC = 2.7
 
@@ -35,6 +38,10 @@ interface HostEvents extends Record<string, unknown[]> {
   videoError: [message: string]
   /** The set of available visualizers changed (addon registered/removed). */
   visualizers: [list: { id: string; name: string }[]]
+  /** The current track/live source has lyrics to show (or no longer does). */
+  'lyrics-available': [available: boolean]
+  /** The show-lyrics toggle changed. */
+  'lyrics-enabled': [enabled: boolean]
 }
 
 /** Minimal transport surface for the pop-out / fullscreen buttons — provided by
@@ -50,12 +57,136 @@ export interface TransportControls {
   getVolume(): number
   setVolume(v: number): void
   onVolume(cb: (v: number) => void): () => void
+  /** seconds */
+  getPosition(): number
+  getDuration(): number
+  seek(seconds: number): void
+  onPosition(cb: (posSec: number, durSec: number) => void): () => void
+}
+
+const fmtT = (s: number): string =>
+  isFinite(s) && s > 0 ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '0:00'
+
+/** An auto-hiding transport overlay (buttons + seek + volume) pinned to the
+ *  bottom of `host`. Appears on mouse move, fades after a few idle seconds.
+ *  Used by BOTH the visualizer pop-out and fullscreen. Returns a teardown. */
+function mountControlsOverlay(
+  doc: Document,
+  host: HTMLElement,
+  t: TransportControls,
+  opts: { win?: Window; frameName?: string; onExit?: () => void }
+): () => void {
+  const mk = (tag: string, css: string, text = ''): HTMLElement => {
+    const el = doc.createElement(tag)
+    el.style.cssText = css
+    if (text) el.textContent = text
+    return el
+  }
+  const BTN =
+    "-webkit-app-region:no-drag;background:rgba(29,34,43,.9);color:#e6e9ef;border:1px solid #000;border-radius:4px;" +
+    'min-width:34px;padding:5px 9px;font-size:15px;cursor:pointer'
+  const bar = mk(
+    'div',
+    'position:absolute;left:0;right:0;bottom:0;z-index:6;display:flex;align-items:center;gap:8px;' +
+      'padding:10px 14px;background:linear-gradient(transparent,rgba(6,8,11,.9));' +
+      "font-family:'Segoe UI',sans-serif;opacity:0;pointer-events:none;transition:opacity .25s;-webkit-app-region:drag"
+  )
+  const prev = mk('button', BTN, '⏮')
+  const play = mk('button', BTN, '▶')
+  const stop = mk('button', BTN, '⏹')
+  const next = mk('button', BTN, '⏭')
+  const time = mk('span', '-webkit-app-region:no-drag;font-family:Consolas,monospace;font-size:12px;color:#8ce8ac;min-width:92px')
+  const seek = mk('input', '-webkit-app-region:no-drag;flex:1;accent-color:#3fae66;cursor:pointer') as HTMLInputElement
+  seek.type = 'range'
+  seek.min = '0'
+  seek.max = '1000'
+  seek.value = '0'
+  const volIcon = mk('span', 'font-size:14px', '🔊')
+  const vol = mk('input', '-webkit-app-region:no-drag;width:84px;accent-color:#2d9f57;cursor:pointer') as HTMLInputElement
+  vol.type = 'range'
+  vol.min = '0'
+  vol.max = '100'
+  bar.append(prev, play, stop, next, time, seek, volIcon, vol)
+  if (opts.frameName) {
+    const min = mk('button', BTN, '–')
+    const close = mk('button', BTN, '×')
+    min.addEventListener('click', () => void native.invoke('popout:minimize', opts.frameName as 'ampwin-viz'))
+    close.addEventListener('click', () => opts.win?.close())
+    bar.append(min, close)
+  } else if (opts.onExit) {
+    const exit = mk('button', BTN, '⤢')
+    exit.title = 'Exit fullscreen'
+    exit.addEventListener('click', () => opts.onExit?.())
+    bar.append(exit)
+  }
+  host.appendChild(bar)
+
+  // ---- auto-hide -----------------------------------------------------------
+  const view = doc.defaultView as Window & typeof globalThis
+  let hideTimer: number | null = null
+  const show = (): void => {
+    bar.style.opacity = '1'
+    bar.style.pointerEvents = 'auto'
+    if (hideTimer !== null) view.clearTimeout(hideTimer)
+    hideTimer = view.setTimeout(() => {
+      bar.style.opacity = '0'
+      bar.style.pointerEvents = 'none'
+    }, 2600)
+  }
+  host.addEventListener('mousemove', show)
+  show() // flash on open
+
+  // ---- wiring --------------------------------------------------------------
+  const setGlyph = (s: PlayState): void => {
+    play.textContent = s === 'playing' ? '⏸' : '▶'
+  }
+  prev.addEventListener('click', () => t.previous())
+  play.addEventListener('click', () => t.togglePlay())
+  stop.addEventListener('click', () => t.stop())
+  next.addEventListener('click', () => t.next())
+  let seeking = false
+  seek.addEventListener('pointerdown', () => (seeking = true))
+  seek.addEventListener('input', () => {
+    const d = t.getDuration()
+    if (d > 0) time.textContent = `${fmtT((Number(seek.value) / 1000) * d)} / ${fmtT(d)}`
+  })
+  seek.addEventListener('change', () => {
+    const d = t.getDuration()
+    if (d > 0) t.seek((Number(seek.value) / 1000) * d)
+    seeking = false
+  })
+  vol.addEventListener('input', () => t.setVolume(Number(vol.value) / 100))
+
+  setGlyph(t.getState())
+  vol.value = String(Math.round(t.getVolume() * 100))
+  const p0 = t.getPosition()
+  const d0 = t.getDuration()
+  time.textContent = `${fmtT(p0)} / ${fmtT(d0)}`
+  if (d0 > 0) seek.value = String(Math.round((p0 / d0) * 1000))
+
+  const unState = t.onState(setGlyph)
+  const unVol = t.onVolume((v) => (vol.value = String(Math.round(v * 100))))
+  const unPos = t.onPosition((pos, dur) => {
+    if (seeking) return
+    time.textContent = `${fmtT(pos)} / ${fmtT(dur)}`
+    if (dur > 0) seek.value = String(Math.round((pos / dur) * 1000))
+  })
+
+  return () => {
+    if (hideTimer !== null) view.clearTimeout(hideTimer)
+    host.removeEventListener('mousemove', show)
+    unState()
+    unVol()
+    unPos()
+    bar.remove()
+  }
 }
 
 export class VisualizerHost {
   readonly events = new Emitter<HostEvents>()
   readonly registry = new PluginRegistry()
   readonly catalog = new PresetCatalog()
+  private readonly lyricsOverlay = new LyricsOverlay()
 
   private graph: AudioGraph
   private surface: VizSurface | null = null
@@ -77,27 +208,38 @@ export class VisualizerHost {
   private lastPresetError: string | null = null
 
   // Video state (independent of which surface is showing it). 'url' plays a
-  // file directly; 'stream' plays a progressive ffmpeg→MSE conversion.
-  private mode: 'viz' | 'video' = 'viz'
+  // file directly; 'stream' plays a progressive ffmpeg→MSE conversion; 'embed'
+  // is the YouTube-iframe fallback for un-extractable videos.
+  private mode: 'viz' | 'video' | 'embed' = 'viz'
   private videoSrc:
     | { kind: 'url'; url: string }
     | { kind: 'stream'; path: string; durationSec: number }
+    | { kind: 'embed'; videoId: string }
     | null = null
   private streamPlayer: VideoStreamPlayer | null = null
+  private embedPlayer: EmbedPlayer | null = null
   private videoPosition = 0
   private videoVolume = 1
+  // Taps the surface <video>'s audio into the graph (destination + analyser) so
+  // a visualizer can react to a video's audio. Created once per <video> element
+  // (createMediaElementSource is one-shot); torn down with the surface.
+  private videoTapNode: MediaElementAudioSourceNode | null = null
+  private videoTapEl: HTMLVideoElement | null = null
+  // Guards wireVideo so re-applying the mode doesn't restart a playing video.
+  private videoWiredEl: HTMLVideoElement | null = null
 
   // Fullscreen + pop-out.
   private fsContainer: HTMLElement | null = null
   private popoutWin: Window | null = null
   private popoutWatch: number | null = null
   private transport: TransportControls | null = null
-  private transportUnsub: (() => void) | null = null
+  private overlayUnsub: (() => void) | null = null
 
   constructor(graph: AudioGraph) {
     this.graph = graph
     this.registry.register(createButterchurnPlugin(), 'builtin')
     this.registry.register(createBarsPlugin(), 'builtin')
+    this.registry.register(createBlackScreenPlugin(), 'builtin')
 
     document.addEventListener('visibilitychange', () => {
       if (this.mode !== 'viz') return
@@ -117,6 +259,7 @@ export class VisualizerHost {
     if (this.registry.get(settings.activeVisualizer)) this.activeId = settings.activeVisualizer
     this.currentPresetId = settings.vizPresetId
     this.cycle = { ...settings.vizCycle }
+    this.lyricsOverlay.setEnabled(settings.showLyrics)
     void this.catalog.load()
   }
 
@@ -125,7 +268,7 @@ export class VisualizerHost {
     frameCount: number
     presetId: string | null
     lastPresetError: string | null
-    mode: 'viz' | 'video'
+    mode: 'viz' | 'video' | 'embed'
   } {
     return {
       activeId: this.activeId,
@@ -158,6 +301,8 @@ export class VisualizerHost {
     // (pop-out/fullscreen swap) gets a fresh player resumed at videoPosition.
     this.streamPlayer?.destroy()
     this.streamPlayer = null
+    this.embedPlayer?.destroy()
+    this.embedPlayer = null
     this.stopLoop()
     this.stopCycleTimer()
     this.resizeObserver?.disconnect()
@@ -170,6 +315,20 @@ export class VisualizerHost {
       }
       this.active = null
     }
+    this.lyricsOverlay.detach()
+    // The audio tap is bound to the surface's <video>, about to be destroyed. A
+    // live video re-wires on the next mount and resumes at this.videoPosition
+    // (players were already torn down above).
+    if (this.videoTapNode) {
+      try {
+        this.videoTapNode.disconnect()
+      } catch {
+        /* ignore */
+      }
+      this.videoTapNode = null
+    }
+    this.videoTapEl = null
+    this.videoWiredEl = null
     this.surface?.destroy()
     this.surface = null
     this.surfaceInteraction = null
@@ -192,6 +351,19 @@ export class VisualizerHost {
     this.surfaceInteraction?.click()
   }
 
+  /** True once the embed iframe has navigated cross-origin — i.e. YouTube's
+   *  player actually loaded (a blank/same-origin iframe stays readable). */
+  debugEmbedLoaded(): boolean {
+    const f = this.surface?.embed
+    if (!f) return false
+    try {
+      void f.contentWindow?.location.href // same-origin (blank) → readable
+      return false
+    } catch {
+      return true // cross-origin → YouTube loaded
+    }
+  }
+
   /** Verify the mini-view overlay sits exactly on the skin's anchor canvas —
    *  if it didn't, the visualizer and video would render off-screen. */
   debugSurfaceMatchesAnchor(): { ok: boolean; detail: string } | null {
@@ -212,6 +384,7 @@ export class VisualizerHost {
   private async mount(mountSpec: SurfaceMount): Promise<void> {
     this.teardownSurface()
     this.surface = new VizSurface(mountSpec)
+    this.lyricsOverlay.attach(this.surface.lyrics)
     if (mountSpec.kind === 'own') this.bindInteraction(this.surface.interactionTarget)
     await this.initActivePlugin()
     this.applyMode()
@@ -312,11 +485,22 @@ export class VisualizerHost {
 
   private applyMode(): void {
     if (!this.surface) return
+    // Over real video/embed, don't take the whole frame — show just the current
+    // synced line near the bottom (subtitle style). Full overlay in viz mode.
+    this.lyricsOverlay.setCompact(this.mode !== 'viz')
+    // A url/stream video plays whenever it's loaded — visible in 'video' mode,
+    // hidden (but still playing, feeding the analyser) in 'viz' mode so a chosen
+    // visualizer can react to it.
+    if (this.videoSrc && this.videoSrc.kind !== 'embed') this.wireVideo()
     if (this.mode === 'video') {
       this.surface.showVideo()
       this.stopLoop()
       this.stopCycleTimer()
-      this.wireVideo()
+    } else if (this.mode === 'embed') {
+      this.surface.showEmbed()
+      this.stopLoop()
+      this.stopCycleTimer()
+      this.wireEmbed()
     } else {
       this.surface.showCanvas()
       this.startLoop()
@@ -324,9 +508,54 @@ export class VisualizerHost {
     }
   }
 
+  private wireEmbed(): void {
+    if (!this.surface || this.videoSrc?.kind !== 'embed' || this.embedPlayer) return
+    // Resume where we were (pop-out/fullscreen rebuild the iframe from scratch).
+    const player = new EmbedPlayer(this.surface.embed, this.videoSrc.videoId, {
+      volume: this.videoVolume,
+      startSec: this.videoPosition
+    })
+    this.embedPlayer = player
+    // A couple of loading beats before YouTube's player answers — report a
+    // playing state so the skin leaves its 'loading' spinner.
+    this.events.emit('videoState', { playing: true, position: 0, duration: 0 })
+    player.events.on('state', (playing) => {
+      this.events.emit('videoState', { playing, position: this.videoPosition, duration: 0 })
+    })
+    player.events.on('position', (pos, dur) => {
+      this.videoPosition = pos
+      this.events.emit('videoState', { playing: true, position: pos, duration: dur })
+    })
+    player.events.on('ended', () => this.events.emit('videoEnded'))
+  }
+
+  /** Route the surface <video>'s audio through the graph: to the speakers AND to
+   *  the analyser, so a visualizer can react to a video's audio. Once per element. */
+  private wireVideoTap(): void {
+    const v = this.surface?.video
+    if (!v || this.videoTapEl === v) return
+    // The graph's AudioContext belongs to the main window; a popped-out surface's
+    // <video> lives in another window and can't be tapped. It still plays there.
+    if (v.ownerDocument !== document) return
+    try {
+      const src = this.graph.ctx.createMediaElementSource(v)
+      src.connect(this.graph.ctx.destination) // hear it (v.volume still applies)
+      src.connect(this.graph.vizSource) // let the analyser/visualizer see it
+      this.videoTapNode = src
+      this.videoTapEl = v
+    } catch (err) {
+      // Already tapped for this element (or unsupported) — it still plays.
+      console.error('video audio tap failed', err)
+    }
+  }
+
   private wireVideo(): void {
     const v = this.surface?.video
-    if (!v || this.videoSrc == null) return
+    if (!v || this.videoSrc == null || this.videoSrc.kind === 'embed') return
+    // Guard: re-applying the mode (e.g. video↔viz toggle) must not restart it.
+    if (this.videoWiredEl === v) return
+    this.videoWiredEl = v
+    this.wireVideoTap()
     v.volume = this.videoVolume
     v.ontimeupdate = (): void => {
       this.videoPosition = v.currentTime
@@ -348,7 +577,7 @@ export class VisualizerHost {
       }
       v.src = this.videoSrc.url
       void v.play().catch((err) => console.error('video play failed', err))
-    } else {
+    } else if (this.videoSrc.kind === 'stream') {
       // Progressive stream: the player owns src (MediaSource) and resumes at
       // the remembered position (surface swaps mid-video restart the stream).
       this.streamPlayer = new VideoStreamPlayer(v, this.videoSrc.path, this.videoSrc.durationSec)
@@ -377,6 +606,7 @@ export class VisualizerHost {
     this.videoPosition = opts.positionSec ?? 0
     if (opts.volume != null) this.videoVolume = opts.volume
     this.applyMode()
+    this.events.emit('visualizers', this.listVisualizers())
   }
 
   /** Progressively stream a video that Chromium can't play directly —
@@ -392,11 +622,30 @@ export class VisualizerHost {
     this.videoPosition = opts.positionSec ?? 0
     if (opts.volume != null) this.videoVolume = opts.volume
     this.applyMode()
+    this.events.emit('visualizers', this.listVisualizers())
+  }
+
+  /** YouTube-embed fallback: play an un-extractable video in YouTube's own
+   *  player on the surface. No audio tap (visualizer/stems can't see it) — this
+   *  is a passive last resort for DRM/blocked videos. */
+  showEmbed(videoId: string, opts: { volume?: number } = {}): void {
+    this.stopVideoPlayback()
+    this.mode = 'embed'
+    this.videoSrc = { kind: 'embed', videoId }
+    this.videoPosition = 0
+    if (opts.volume != null) this.videoVolume = opts.volume
+    this.applyMode()
+    this.events.emit('visualizers', this.listVisualizers())
   }
 
   private stopVideoPlayback(): void {
     this.streamPlayer?.destroy()
     this.streamPlayer = null
+    this.embedPlayer?.destroy()
+    this.embedPlayer = null
+    // Leave the audio tap in place (it's reusable for the element's lifetime);
+    // just allow the next video to re-wire this element.
+    this.videoWiredEl = null
     const v = this.surface?.video
     if (v) {
       try {
@@ -409,6 +658,16 @@ export class VisualizerHost {
     }
   }
 
+  /** Immediately stop whatever video/embed is currently on the surface (pausing
+   *  its audio and tearing down the stream/embed), staying in video mode so the
+   *  surface just goes black as a loading state. Used when switching tracks so
+   *  the old source doesn't keep playing (audio + bandwidth) during the next
+   *  track's multi-second resolve — otherwise the switch appears to hang. */
+  stopCurrentVideo(): void {
+    if (this.mode === 'viz') return
+    this.stopVideoPlayback()
+  }
+
   /** Leave video mode; the visualizer returns to the surface. */
   returnToVisualizer(): void {
     this.stopVideoPlayback()
@@ -416,21 +675,28 @@ export class VisualizerHost {
     this.videoSrc = null
     this.videoPosition = 0
     this.applyMode()
+    this.events.emit('visualizers', this.listVisualizers())
   }
 
   isVideoMode(): boolean {
-    return this.mode === 'video'
+    return this.mode !== 'viz'
   }
 
   playVideo(): void {
-    void this.surface?.video.play().catch(() => {})
+    if (this.mode === 'embed') this.embedPlayer?.play()
+    else void this.surface?.video.play().catch(() => {})
   }
 
   pauseVideo(): void {
-    this.surface?.video.pause()
+    if (this.mode === 'embed') this.embedPlayer?.pause()
+    else this.surface?.video.pause()
   }
 
   seekVideo(seconds: number): void {
+    if (this.mode === 'embed') {
+      this.embedPlayer?.seek(seconds)
+      return
+    }
     if (this.streamPlayer) {
       this.streamPlayer.seek(seconds)
       return
@@ -441,17 +707,22 @@ export class VisualizerHost {
 
   setVideoVolume(vol: number): void {
     this.videoVolume = Math.min(1, Math.max(0, vol))
-    if (this.surface) this.surface.video.volume = this.videoVolume
+    if (this.mode === 'embed') this.embedPlayer?.setVolume(this.videoVolume)
+    else if (this.surface) this.surface.video.volume = this.videoVolume
   }
 
   // ---- visualizer selection --------------------------------------------------
 
   getActiveVisualizerId(): string {
-    return this.activeId
+    // 'video' is a pseudo-entry: it's "selected" whenever the surface shows video.
+    return this.mode === 'viz' ? this.activeId : 'video'
   }
 
   listVisualizers(): { id: string; name: string }[] {
-    return this.registry.list()
+    const list = this.registry.list()
+    // Offer "Video" while a video is loaded so the user can flip the surface
+    // between watching the video and a visualizer reacting to its audio.
+    return this.videoSrc ? [{ id: 'video', name: '📺 Video' }, ...list] : list
   }
 
   /** Register a plugin and notify listeners so UIs (e.g. the skin's visualizer
@@ -462,12 +733,25 @@ export class VisualizerHost {
   }
 
   async setActiveVisualizer(id: string): Promise<void> {
+    // "Video": flip the surface back to the video (it's still playing). No-op if
+    // no video is loaded or we're already showing it.
+    if (id === 'video') {
+      if (!this.videoSrc || this.mode !== 'viz') return
+      this.mode = this.videoSrc.kind === 'embed' ? 'embed' : 'video'
+      this.applyMode()
+      this.events.emit('visualizers', this.listVisualizers())
+      return
+    }
     if (!this.registry.get(id)) throw new Error(`unknown visualizer: ${id}`)
-    if (id === this.activeId && this.active) return
+    const wasVideo = this.mode !== 'viz'
+    const idChanged = id !== this.activeId
+    if (!wasVideo && !idChanged && this.active) return
     this.activeId = id
-    void native.invoke('store:settings:patch', { activeVisualizer: id })
-    // Re-init the plugin on a fresh canvas (new context type is fine now).
-    if (this.surface && this.active) {
+    if (idChanged) void native.invoke('store:settings:patch', { activeVisualizer: id })
+    // Switching from video → a visualizer: a url/stream video keeps playing
+    // (hidden) and feeds the analyser, so the visualizer reacts to it.
+    this.mode = 'viz'
+    if (idChanged && this.surface && this.active) {
       try {
         this.active.destroy()
       } catch {
@@ -476,9 +760,15 @@ export class VisualizerHost {
       this.active = null
       this.resizeObserver?.disconnect()
       this.resizeObserver = null
-      // Recreate the canvas so a WebGL→2D switch gets a clean context.
+      // Recreate the canvas so a WebGL→2D switch gets a clean context; a live
+      // video re-wires on the fresh surface and resumes at its position.
       await this.remountSameTarget()
+    } else {
+      // Same plugin (already initialized) — just show the canvas; the hidden
+      // video keeps playing without a reload hiccup.
+      this.applyMode()
     }
+    this.events.emit('visualizers', this.listVisualizers())
   }
 
   /** Re-init the active visualizer on its current surface so plugins that tap
@@ -626,6 +916,56 @@ export class VisualizerHost {
     if (isButterchurnHandle(this.active)) this.active.showTitle(title)
   }
 
+  // ---- lyrics overlay --------------------------------------------------------
+
+  /** Set the current track's lyrics (embedded/.lrc), or null to clear. */
+  setLyrics(l: Lyrics | null): void {
+    this.lyricsOverlay.setLyrics(l)
+    this.events.emit('lyrics-available', this.lyricsOverlay.hasLyrics())
+  }
+
+  /** Feed a live (transcription) lyrics source; overrides metadata while present. */
+  pushLiveLyrics(l: Lyrics | null): void {
+    this.lyricsOverlay.pushLive(l)
+    this.events.emit('lyrics-available', this.lyricsOverlay.hasLyrics())
+  }
+
+  clearLiveLyrics(): void {
+    this.lyricsOverlay.clearLive()
+    this.events.emit('lyrics-available', this.lyricsOverlay.hasLyrics())
+  }
+
+  /** Playback position (ms) for highlighting the active synced line. */
+  setLyricsPosition(ms: number): void {
+    this.lyricsOverlay.setPositionMs(ms)
+  }
+
+  setLyricsEnabled(on: boolean): void {
+    this.lyricsOverlay.setEnabled(on)
+    void native.invoke('store:settings:patch', { showLyrics: on })
+    this.events.emit('lyrics-enabled', on)
+  }
+
+  lyricsEnabled(): boolean {
+    return this.lyricsOverlay.isEnabled()
+  }
+
+  lyricsAvailable(): boolean {
+    return this.lyricsOverlay.hasLyrics()
+  }
+
+  /** Test hook for the lyrics overlay state. */
+  debugLyrics(): {
+    available: boolean
+    enabled: boolean
+    visible: boolean
+    activeText: string
+    viewH: number
+    activeCenterY: number
+  } {
+    return this.lyricsOverlay.debugState()
+  }
+
   async importPresetFiles(): Promise<PresetInfo[]> {
     const paths = await native.invoke('dialog:open-files', 'preset')
     if (paths.length === 0) return []
@@ -657,61 +997,15 @@ export class VisualizerHost {
 
     const doc = win.document
     doc.title = 'Ampwin Visualizer'
+    // No static title bar — a single full-window stage with an auto-hiding
+    // controls overlay (buttons + seek + volume) that appears on mouse move.
     doc.head.innerHTML = `<style>
       * { margin: 0; box-sizing: border-box; user-select: none; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-      body { display: flex; flex-direction: column; font-family: 'Segoe UI', sans-serif; }
-      #bar { display: flex; align-items: center; gap: 5px; padding: 5px 8px;
-             background: linear-gradient(#20242c, #14171d); border-bottom: 1px solid #000;
-             -webkit-app-region: drag; }
-      #logo { font-size: 10px; font-weight: bold; letter-spacing: 2px; color: #3fdf6f; margin-right: 6px; }
-      button { -webkit-app-region: no-drag; background: #1d222b; color: #cfd4dd;
-               border: 1px solid #000; border-radius: 3px; min-width: 30px;
-               padding: 3px 8px; font-size: 13px; cursor: pointer; }
-      button:hover { background: #2a3140; }
-      #x:hover { background: #7f1f1f; }
-      #sp { flex: 1; }
-      #vol { -webkit-app-region: no-drag; width: 70px; accent-color: #2d9f57; }
-      #stage { flex: 1; min-height: 0; position: relative; }
+      #stage { width: 100%; height: 100%; position: relative; }
     </style>`
-    doc.body.innerHTML = `
-      <div id="bar">
-        <span id="logo">AMPWIN</span>
-        <button id="b-prev" title="Previous">⏮</button>
-        <button id="b-play" title="Play/Pause">▶</button>
-        <button id="b-stop" title="Stop">⏹</button>
-        <button id="b-next" title="Next">⏭</button>
-        <span id="sp"></span>
-        <span title="Volume">🔊</span>
-        <input id="vol" type="range" min="0" max="100" value="80" title="Volume" />
-        <button id="b-min" title="Minimize">–</button>
-        <button id="x" title="Close">×</button>
-      </div>
-      <div id="stage"></div>`
-
-    const t = this.transport
-    const playBtn = doc.getElementById('b-play')!
-    const setPlayGlyph = (s: PlayState): void => {
-      playBtn.textContent = s === 'playing' ? '⏸' : '▶'
-    }
-    doc.getElementById('b-prev')!.addEventListener('click', () => t?.previous())
-    playBtn.addEventListener('click', () => t?.togglePlay())
-    doc.getElementById('b-stop')!.addEventListener('click', () => t?.stop())
-    doc.getElementById('b-next')!.addEventListener('click', () => t?.next())
-    doc.getElementById('b-min')!.addEventListener('click', () => void native.invoke('popout:minimize', 'ampwin-viz'))
-    doc.getElementById('x')!.addEventListener('click', () => win.close())
-    const volEl = doc.getElementById('vol') as HTMLInputElement
-    if (t) {
-      setPlayGlyph(t.getState())
-      volEl.value = String(Math.round(t.getVolume() * 100))
-      volEl.addEventListener('input', () => t.setVolume(Number(volEl.value) / 100))
-      const unState = t.onState(setPlayGlyph)
-      const unVol = t.onVolume((v) => (volEl.value = String(Math.round(v * 100))))
-      this.transportUnsub = () => {
-        unState()
-        unVol()
-      }
-    }
+    doc.body.innerHTML = '<div id="stage"></div>'
+    const stage = doc.getElementById('stage')!
 
     win.addEventListener('resize', () => this.refreshCanvasSize())
     win.addEventListener('unload', () => this.onPopoutClosed())
@@ -719,7 +1013,10 @@ export class VisualizerHost {
       if (this.popoutWin && this.popoutWin.closed) this.onPopoutClosed()
     }, 1000)
 
-    void this.mount({ kind: 'own', container: doc.getElementById('stage')! })
+    void this.mount({ kind: 'own', container: stage })
+    if (this.transport) {
+      this.overlayUnsub = mountControlsOverlay(doc, stage, this.transport, { win, frameName: 'ampwin-viz' })
+    }
   }
 
   closePopout(): void {
@@ -734,8 +1031,8 @@ export class VisualizerHost {
       clearInterval(this.popoutWatch)
       this.popoutWatch = null
     }
-    this.transportUnsub?.()
-    this.transportUnsub = null
+    this.overlayUnsub?.()
+    this.overlayUnsub = null
     this.teardownSurface()
     if (this.skinAnchor && this.skinAnchor.isConnected) {
       void this.mount({ kind: 'overlay', anchor: this.skinAnchor })
@@ -753,6 +1050,11 @@ export class VisualizerHost {
       this.fsContainer = container
       await container.requestFullscreen().catch(() => {})
       await this.mount({ kind: 'own', container })
+      if (this.transport) {
+        this.overlayUnsub = mountControlsOverlay(document, container, this.transport, {
+          onExit: () => void this.setFullscreen(false)
+        })
+      }
     } else if (!on && this.fsContainer) {
       if (document.fullscreenElement) await document.exitFullscreen().catch(() => {})
       this.exitFullscreenCleanup()
@@ -760,6 +1062,8 @@ export class VisualizerHost {
   }
 
   private exitFullscreenCleanup(): void {
+    this.overlayUnsub?.()
+    this.overlayUnsub = null
     this.teardownSurface()
     this.fsContainer?.remove()
     this.fsContainer = null

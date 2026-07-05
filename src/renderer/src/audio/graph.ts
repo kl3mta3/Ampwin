@@ -16,6 +16,12 @@
 //
 // MediaElementSourceNode is once-per-element, so the two <audio> elements are
 // created here and reused forever by swapping src.
+//
+// The equalizer sits on the PLAYBACK path only (mixerGain → eq → masterGain);
+// vizSource still taps mixerGain (pre-EQ) so it also works for the system-audio
+// loopback, which must not be EQ'd.
+
+import { Equalizer } from './eq'
 
 export interface AudioGraph {
   ctx: AudioContext
@@ -26,6 +32,8 @@ export interface AudioGraph {
    *  (own playback ↔ system loopback) without touching downstream consumers. */
   vizSource: GainNode
   analyser: AnalyserNode
+  /** Realtime 10-band graphic EQ on the app's own playback. */
+  eq: Equalizer
   elements: [HTMLAudioElement, HTMLAudioElement]
 }
 
@@ -37,8 +45,11 @@ export function createAudioGraph(hostLayer: HTMLElement): AudioGraph {
   const vizSource = ctx.createGain()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 2048
+  const eq = new Equalizer(ctx)
 
-  mixerGain.connect(masterGain)
+  // Playback path runs through the EQ; the visualizer tap stays pre-EQ.
+  mixerGain.connect(eq.input)
+  eq.output.connect(masterGain)
   masterGain.connect(ctx.destination)
   mixerGain.connect(vizSource)
   vizSource.connect(analyser)
@@ -51,5 +62,5 @@ export function createAudioGraph(hostLayer: HTMLElement): AudioGraph {
     return el
   }
 
-  return { ctx, mixerGain, masterGain, vizSource, analyser, elements: [make(), make()] }
+  return { ctx, mixerGain, masterGain, vizSource, analyser, eq, elements: [make(), make()] }
 }

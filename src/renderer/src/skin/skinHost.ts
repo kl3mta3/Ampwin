@@ -134,7 +134,8 @@ export class SkinManager {
             skinOps: this.ops,
             addonOps: this.addonOps ?? {
               setEnabled: () => Promise.resolve(),
-              uninstall: () => Promise.resolve()
+              uninstall: () => Promise.resolve(),
+              reload: () => Promise.resolve()
             }
           },
           () => {

@@ -4,10 +4,12 @@
 // quits itself when done.
 
 import { native } from './native'
+import type { Lyrics } from '../../shared/types'
 import type { PlayerController } from './playlist/controller'
 import type { SkinManager } from './skin/skinHost'
 import type { VisualizerHost } from './viz/host'
 import type { SystemAudioCapture } from './audio/systemAudio'
+import type { Equalizer } from './audio/eq'
 import type { VisualizerPlugin } from './viz/plugin'
 
 export async function runSelfTest(
@@ -15,7 +17,8 @@ export async function runSelfTest(
   controller: PlayerController,
   skinManager: SkinManager,
   vizHost: VisualizerHost,
-  systemAudio?: SystemAudioCapture
+  systemAudio?: SystemAudioCapture,
+  eq?: Equalizer
 ): Promise<void> {
   const results: string[] = []
   let failed = false
@@ -36,6 +39,48 @@ export async function runSelfTest(
   // a visualizer, renders, and survives a skin switch (addon-owned lifetime).
   if (path === 'addons') {
     await runAddonLoadTest(skinManager, vizHost, check)
+    await finish()
+    return
+  }
+
+  // AMPWIN_SELFTEST=embed → verify the YouTube-embed fallback mounts, plays,
+  // and tears down (the fallback for videos we can't extract a stream for).
+  if (path === 'embed') {
+    await runEmbedTest(vizHost, check)
+    await finish()
+    return
+  }
+
+  // AMPWIN_SELFTEST=stems → REAL end-to-end HTDemucs separation on test-media/
+  // tone.flac with the 6s model (downloads ~130MB into userData/models on the
+  // first run). Verifies engine → onnxruntime → cached WAVs → export.
+  if (path === 'stems') {
+    await runStemsTest(check)
+    await finish()
+    return
+  }
+
+  // AMPWIN_SELFTEST=lyrics → the Black Screen built-in visualizer + the synced
+  // lyrics overlay (availability, position-driven highlight, live source).
+  if (path === 'lyrics') {
+    await runLyricsTest(vizHost, check)
+    await finish()
+    return
+  }
+
+
+  // AMPWIN_SELFTEST=lyrics-online → live LRCLIB fetch of a known song's synced
+  // lyrics + the userData cache (the reliable primary lyrics source).
+  if (path === 'lyrics-online') {
+    await runOnlineLyricsTest(check)
+    await finish()
+    return
+  }
+
+  // AMPWIN_SELFTEST=eq → the graphic EQ applies its band gains to the Web Audio
+  // biquads when enabled and is transparent (0 dB) when disabled.
+  if (path === 'eq') {
+    runEqTest(eq, check)
     await finish()
     return
   }
@@ -113,7 +158,26 @@ export async function runSelfTest(
         startLatency < 8000,
         `${(startLatency / 1000).toFixed(1)}s to playing`
       )
-      await sleep(1500) // let position advance before the seek test
+
+      // Video-as-visualizer option: "Video" is offered + selected while a video
+      // plays; switching to a real visualizer keeps the video playing (hidden,
+      // feeding the analyser); switching back shows the video again.
+      check('Video appears in the visualizer list', vizHost.listVisualizers().some((v) => v.id === 'video'))
+      check('Video is the selected entry while a video plays', vizHost.getActiveVisualizerId() === 'video')
+      await vizHost.setActiveVisualizer('bars')
+      await sleep(1500)
+      check(
+        'switching to a visualizer keeps the video playing (hidden)',
+        vizHost.getDebugInfo().mode === 'viz' &&
+          vizHost.getActiveVisualizerId() === 'bars' &&
+          controller.getSnapshot().state === 'playing',
+        `mode=${vizHost.getDebugInfo().mode} active=${vizHost.getActiveVisualizerId()} state=${controller.getSnapshot().state}`
+      )
+      await vizHost.setActiveVisualizer('video')
+      await sleep(500)
+      check('switching back to Video shows the video', vizHost.getDebugInfo().mode === 'video', `mode=${vizHost.getDebugInfo().mode}`)
+
+      await sleep(1200) // let position advance before the seek test
 
       const target = snap.durationSec / 2
       controller.seekTo(target)
@@ -399,6 +463,33 @@ export async function runSelfTest(
       }
     }
 
+    // ---- saved playlists (save / overwrite-by-id / list / get / delete) ------
+    const plId = 'selftest-pl'
+    const mkPl = (name: string) => ({
+      id: plId,
+      name,
+      tracks: controller.model.getTracks(),
+      createdAt: 0,
+      updatedAt: 1
+    })
+    await native.invoke('store:playlists:save', mkPl('SelfTest PL'))
+    let pls = await native.invoke('store:playlists:list')
+    check('saved playlist appears in list', pls.some((p) => p.id === plId && p.name === 'SelfTest PL'))
+    // Overwrite the same id with a new name — must replace, not duplicate.
+    await native.invoke('store:playlists:save', mkPl('SelfTest PL v2'))
+    pls = await native.invoke('store:playlists:list')
+    const mine = pls.filter((p) => p.id === plId)
+    check(
+      'overwrite keeps one entry + updates it',
+      mine.length === 1 && mine[0].name === 'SelfTest PL v2',
+      `count=${mine.length} name=${mine[0]?.name}`
+    )
+    const loaded = await native.invoke('store:playlists:get', plId)
+    check('saved playlist loads back with its tracks', loaded.tracks.length === controller.model.size())
+    await native.invoke('store:playlists:delete', plId)
+    pls = await native.invoke('store:playlists:list')
+    check('saved playlist deletes', !pls.some((p) => p.id === plId))
+
     // ---- addon framework -----------------------------------------------------
     // Addon-owned visualizer plugins list like built-ins but are removed by
     // addon teardown (not skin teardown), and built-ins survive.
@@ -475,6 +566,350 @@ export async function runSelfTest(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+async function runEmbedTest(
+  vizHost: VisualizerHost,
+  check: (name: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+  try {
+    // Subscribe BEFORE showEmbed so we catch the initial state emit that lets
+    // the skin drop its loading spinner.
+    let gotInitialState = false
+    let gotLiveData = false // real currentTime/duration only comes via postMessage
+    const off = vizHost.events.on('videoState', (s) => {
+      gotInitialState = true
+      if (s.duration > 0) gotLiveData = true
+    })
+
+    // "Me at the zoo" — always available; embeddable.
+    vizHost.showEmbed('jNQXAC9IVRw', { volume: 0.4 })
+    await sleep(300)
+    check('embed mode active', vizHost.getDebugInfo().mode === 'embed', vizHost.getDebugInfo().mode)
+    check('embed emits a playable state (skin leaves loading)', gotInitialState)
+
+    // The real question: did YouTube's player actually load in the iframe?
+    let loaded = false
+    let waited = 0
+    while (!loaded && waited < 10000) {
+      await sleep(500)
+      waited += 500
+      loaded = vizHost.debugEmbedLoaded()
+    }
+    check('YouTube player loaded in the embed', loaded, `after ${(waited / 1000).toFixed(1)}s`)
+
+    // postMessage transport sync is best-effort from a file:// origin — record
+    // whether it worked but don't fail on it (the embed plays regardless).
+    off()
+    void native.invoke('dev:log', `[embed] transport-sync=${gotLiveData} loaded=${loaded}`)
+
+    vizHost.returnToVisualizer()
+    await sleep(400)
+    check('embed tears down back to visualizer', vizHost.getDebugInfo().mode === 'viz')
+    await sleep(400)
+    check(
+      'visualizer renders again after embed',
+      vizHost.getDebugInfo().mode === 'viz' && vizHost.debugCanvasContext() !== 'none'
+    )
+  } catch (err) {
+    check('embed test threw', false, (err as Error).message)
+  }
+}
+
+async function runStemsTest(
+  check: (name: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+  const src = 'C:\\Users\\Kenny\\source\\Claude\\Ampwin\\test-media\\tone.flac'
+  const pack = {
+    id: 'htdemucs-6s',
+    label: 'HTDemucs 6s',
+    kind: 'single' as const,
+    sources: ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano'],
+    files: [
+      {
+        url: 'https://huggingface.co/StemSplitio/htdemucs-6s-onnx/resolve/main/htdemucs_6s_fp16weights.onnx',
+        file: 'htdemucs_6s_fp16weights.onnx'
+      }
+    ]
+  }
+  try {
+    let lastPhase = ''
+    const off = native.on('evt:stems-progress', ({ progress }) => {
+      if (progress.phase !== lastPhase) {
+        lastPhase = progress.phase
+        void native.invoke('dev:log', `[stems-test] phase=${progress.phase} ${progress.detail ?? ''}`)
+      }
+    })
+    const t0 = performance.now()
+    const result = await native.invoke('stems:separate', src, pack, {
+      useGpu: true,
+      force: false,
+      jobKey: 'selftest'
+    })
+    off()
+    const secs = ((performance.now() - t0) / 1000).toFixed(1)
+    check(
+      'separation produced all 6 stems',
+      pack.sources.every((s) => !!result.stems[s]?.path && !!result.stems[s]?.url),
+      `${secs}s fromCache=${result.fromCache}`
+    )
+
+    // The stem WAVs must be valid audio of the source's length (30 s tone).
+    const [probe] = await native.invoke('media:probe', [result.stems['vocals'].path])
+    check(
+      'stem wav is valid audio (~30s)',
+      probe.ok && Math.abs(probe.durationSec - 30) < 1.5,
+      `dur=${probe.durationSec.toFixed(1)}s codec=${probe.codec}`
+    )
+
+    // Preview URL is fetchable (what the <audio> elements in the window use).
+    const res = await fetch(result.stems['drums'].url)
+    check('stem preview url streams', res.status === 200, `HTTP ${res.status}`)
+
+    // Export both encode paths.
+    const mp3 = await native.invoke('stems:export', result.stems['vocals'].path, 'mp3', 'selftest-song', 'vocals')
+    const flac = await native.invoke('stems:export', result.stems['bass'].path, 'flac', 'selftest-song', 'bass')
+    check('export mp3 + flac', /vocals\.mp3$/.test(mp3.path) && /bass\.flac$/.test(flac.path), mp3.path)
+    const [p2] = await native.invoke('media:probe', [mp3.path])
+    check('exported mp3 is valid', p2.ok && p2.durationSec > 28, `dur=${p2.durationSec.toFixed(1)}s`)
+
+    // Mix (karaokefy's instrumental): sum 3 stems → one valid ~30s WAV.
+    const mix = await native.invoke('stems:mix', [result.stems['drums'].path, result.stems['bass'].path, result.stems['other'].path], 'selftest-instrumental')
+    check('mixStems returns a path + url', /\.wav$/i.test(mix.path) && /^ampwin:/.test(mix.url), mix.path)
+    const [pmix] = await native.invoke('media:probe', [mix.path])
+    check('mixed instrumental is valid audio (~30s)', pmix.ok && Math.abs(pmix.durationSec - 30) < 1.5, `dur=${pmix.durationSec.toFixed(1)}s`)
+
+    // Cache: a second run must return instantly from cache.
+    const t1 = performance.now()
+    const again = await native.invoke('stems:separate', src, pack, {
+      useGpu: true,
+      force: false,
+      jobKey: 'selftest2'
+    })
+    check(
+      'second run served from cache',
+      again.fromCache && performance.now() - t1 < 3000,
+      `${((performance.now() - t1) / 1000).toFixed(2)}s`
+    )
+
+    // Cancel: cancel once the separate phase is actually running (as a user
+    // would from the visible progress bar) and confirm it aborts within a chunk.
+    const cancelKey = 'selftest-cancel'
+    let separating = false
+    const offc = native.on('evt:stems-progress', ({ jobKey, progress }) => {
+      if (jobKey === cancelKey && progress.phase === 'separate') separating = true
+    })
+    const pending = native.invoke('stems:separate', src, pack, {
+      useGpu: false,
+      force: true,
+      jobKey: cancelKey
+    })
+    let w = 0
+    while (!separating && w < 20000) {
+      await sleep(200)
+      w += 200
+    }
+    const tc = performance.now()
+    void native.invoke('stems:cancel', cancelKey)
+    let cancelledOk = false
+    try {
+      await pending
+    } catch (e) {
+      cancelledOk = /cancel/i.test((e as Error).message)
+    }
+    offc()
+    // A single session.run() is atomic (can't be interrupted mid-flight), so
+    // worst-case latency is one chunk — ~5s on CPU, ~1-2s on GPU. Well under
+    // the ~35s a full run would take, so this proves cancel actually aborts.
+    check(
+      'separation cancels once running (aborts within a chunk)',
+      cancelledOk && performance.now() - tc < 9000,
+      `${((performance.now() - tc) / 1000).toFixed(1)}s to abort after cancel`
+    )
+
+    // Fast single-file htdemucs (what the v4 addon now defaults to) — one pass,
+    // 4 stems. Downloads a 158 MB model on first run.
+    const fastPack = {
+      id: 'htdemucs',
+      label: 'HTDemucs v4 (fast)',
+      kind: 'single' as const,
+      sources: ['drums', 'bass', 'other', 'vocals'],
+      files: [
+        {
+          url: 'https://huggingface.co/StemSplitio/htdemucs-onnx/resolve/main/htdemucs_fp16weights.onnx',
+          file: 'htdemucs_fp16weights.onnx'
+        }
+      ]
+    }
+    const ft0 = performance.now()
+    const fast = await native.invoke('stems:separate', src, fastPack, {
+      useGpu: false,
+      force: false,
+      jobKey: 'selftest-fast'
+    })
+    check(
+      'single htdemucs (fast) produces 4 stems',
+      fastPack.sources.every((s) => !!fast.stems[s]?.path),
+      `${((performance.now() - ft0) / 1000).toFixed(1)}s`
+    )
+    const [fp] = await native.invoke('media:probe', [fast.stems['vocals'].path])
+    check('fast-model stem is valid audio (~30s)', fp.ok && Math.abs(fp.durationSec - 30) < 1.5, `dur=${fp.durationSec.toFixed(1)}s`)
+  } catch (err) {
+    check('stems test threw', false, (err as Error).message)
+  }
+}
+
+function runEqTest(eq: Equalizer | undefined, check: (name: string, ok: boolean, detail?: string) => void): void {
+  if (!eq) {
+    check('eq available', false, 'no equalizer passed to self-test')
+    return
+  }
+  const target = [6, -6, 3, 0, -3, 4, -4, 2, -2, 5]
+  eq.setEnabled(true)
+  eq.setGains(target)
+  const applied = eq.debugFilterGains()
+  check(
+    'enabled EQ applies band gains to the biquads',
+    applied.length === target.length && applied.every((g, i) => Math.abs(g - target[i]) < 0.001),
+    `applied=[${applied.map((g) => g.toFixed(0)).join(',')}]`
+  )
+  check('gains round-trip through getGains', eq.getGains().every((g, i) => g === target[i]))
+
+  eq.setEnabled(false)
+  const off = eq.debugFilterGains()
+  check('disabled EQ is transparent (all 0 dB)', off.every((g) => g === 0), `off=[${off.map((g) => g.toFixed(0)).join(',')}]`)
+  // The stored gains are preserved even while bypassed.
+  check('bypass keeps stored gains', eq.getGains().every((g, i) => g === target[i]))
+
+  eq.setEnabled(true)
+  eq.reset()
+  check(
+    'reset flattens bands + preamp',
+    eq.debugFilterGains().every((g) => g === 0) && eq.getPreamp() === 0
+  )
+  // Clamping to the ±12 dB range.
+  eq.setGain(0, 999)
+  check('gains clamp to range', eq.getGains()[0] === 12, `band0=${eq.getGains()[0]}`)
+  eq.reset()
+  eq.setEnabled(false)
+}
+
+async function runOnlineLyricsTest(
+  check: (name: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+  try {
+    const q = { artist: 'Bob Marley', title: 'No Woman No Cry', durationSec: 431 }
+    const found = await native.invoke('lyrics:fetch-online', q)
+    check('LRCLIB returned lyrics', !!found && found.lines.length > 3, found ? `${found.lines.length} lines synced=${found.synced}` : 'null')
+    if (found) {
+      check(
+        'lyrics are synced (timestamps present)',
+        found.synced && found.lines.every((l) => typeof l.timeMs === 'number'),
+        `first=${found.lines[0]?.timeMs}ms "${found.lines[0]?.text}"`
+      )
+      const joined = found.lines.map((l) => l.text).join(' ').toLowerCase()
+      check('lyrics contain the chorus', /no,?\s*woman/.test(joined), joined.slice(0, 60))
+    }
+    // Second call should hit the userData cache and match.
+    const again = await native.invoke('lyrics:fetch-online', q)
+    check('cached fetch returns the same lyrics', !!again && again.lines.length === (found?.lines.length ?? -1))
+
+    // Full sidecar round-trip: write <audio>.lrc next to a real audio file, then
+    // probe that file and confirm the app reads the lyrics from the sidecar
+    // (exactly how a played karaoke track shows lyrics).
+    if (found) {
+      const audio = 'C:\\Users\\Kenny\\source\\Claude\\Ampwin\\test-media\\jfk.wav'
+      const { path: lrcPath } = await native.invoke('lyrics:write-sidecar', audio, found.lines)
+      check('writeSidecar writes a matching-basename .lrc next to the file', /jfk\.lrc$/i.test(lrcPath), lrcPath)
+      const [probe] = await native.invoke('media:probe', [audio])
+      check(
+        'probe reads the sidecar → track shows synced lyrics',
+        probe.lyrics?.source === 'lrc' && probe.lyrics?.synced === true && (probe.lyrics.lines.length ?? 0) > 3,
+        `source=${probe.lyrics?.source} synced=${probe.lyrics?.synced} lines=${probe.lyrics?.lines.length}`
+      )
+    }
+  } catch (err) {
+    check('online lyrics test threw', false, (err as Error).message)
+  }
+}
+
+async function runLyricsTest(
+  vizHost: VisualizerHost,
+  check: (name: string, ok: boolean, detail?: string) => void
+): Promise<void> {
+  try {
+    const ids = vizHost.listVisualizers().map((v) => v.id)
+    check('black screen visualizer registered', ids.includes('black'), ids.join(','))
+    await vizHost.setActiveVisualizer('black')
+    await sleep(300)
+    check(
+      'black screen active on a 2D canvas',
+      vizHost.getActiveVisualizerId() === 'black' && vizHost.debugCanvasContext() === '2d',
+      `context=${vizHost.debugCanvasContext()}`
+    )
+
+    const lyrics: Lyrics = {
+      synced: true,
+      source: 'lrc',
+      lines: [
+        { timeMs: 0, text: 'first line' },
+        { timeMs: 1000, text: 'second line' },
+        { timeMs: 2000, text: 'third line' }
+      ]
+    }
+    vizHost.setLyricsEnabled(true)
+    vizHost.setLyrics(lyrics)
+    await sleep(50)
+    let d = vizHost.debugLyrics()
+    check('lyrics available + enabled + visible', d.available && d.enabled && d.visible, JSON.stringify(d))
+
+    vizHost.setLyricsPosition(1500)
+    await sleep(20)
+    d = vizHost.debugLyrics()
+    check('active line tracks position (1.5s → second line)', d.activeText === 'second line', d.activeText)
+
+    vizHost.setLyricsPosition(2500)
+    await sleep(20)
+    d = vizHost.debugLyrics()
+    check('active line advances (2.5s → third line)', d.activeText === 'third line', d.activeText)
+
+    // Off-screen bug regression: with a LONG list on a small (mini) surface, the
+    // active line must sit near the vertical center — not scrolled off.
+    const many: Lyrics = {
+      synced: true,
+      source: 'lrc',
+      lines: Array.from({ length: 40 }, (_, i) => ({ timeMs: i * 1000, text: `line ${i}` }))
+    }
+    vizHost.setLyrics(many)
+    vizHost.setLyricsPosition(25_000) // line 25, deep in the list
+    await sleep(600) // let the scroll transition settle
+    const g = vizHost.debugLyrics()
+    check(
+      'active line is centered on a small surface',
+      g.viewH > 40 && g.activeCenterY >= 0 && Math.abs(g.activeCenterY - g.viewH / 2) < g.viewH * 0.2,
+      `active=line 25 centerY=${g.activeCenterY.toFixed(0)} of viewH=${g.viewH} (want ~${(g.viewH / 2).toFixed(0)})`
+    )
+
+    vizHost.setLyricsEnabled(false)
+    await sleep(20)
+    check('toggle off hides the overlay', !vizHost.debugLyrics().visible)
+
+    vizHost.setLyricsEnabled(true)
+    vizHost.setLyrics(null)
+    await sleep(20)
+    check('clearing lyrics marks the track unavailable', !vizHost.debugLyrics().available)
+
+    vizHost.pushLiveLyrics({ synced: true, source: 'live', lines: [{ timeMs: 0, text: 'live line' }] })
+    await sleep(20)
+    check('live lyrics source becomes available', vizHost.debugLyrics().available)
+    vizHost.clearLiveLyrics()
+    await sleep(20)
+    check('clearLive removes the live lyrics', !vizHost.debugLyrics().available)
+
+    await vizHost.setActiveVisualizer('butterchurn')
+  } catch (err) {
+    check('lyrics test threw', false, (err as Error).message)
+  }
 }
 
 async function runAddonLoadTest(

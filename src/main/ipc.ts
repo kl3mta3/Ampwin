@@ -42,6 +42,16 @@ import {
   uninstallAddon
 } from './addons'
 import { importPresetFiles, listUserPresets, readUserPreset } from './presets'
+import {
+  cancelStemsJob,
+  exportStem,
+  isModelPackInstalled,
+  mixStems,
+  separateTrack,
+  stemsExportDir
+} from './stems/engine'
+import { writeLrcSidecar } from './lyrics/lrc'
+import { fetchOnlineLyrics } from './lyrics/online'
 import { parseM3u, parsePls, serializeM3u } from './playlistFormats'
 import { minimizePopout } from './windows'
 import { getSettings, patchSettings } from './store/settings'
@@ -285,6 +295,38 @@ export function registerIpcHandlers(): void {
   handle('presets:list-user', () => listUserPresets())
   handle('presets:read', (_event, id) => readUserPreset(id))
   handle('presets:import-files', (_event, paths) => importPresetFiles(paths))
+
+  handle('stems:model-installed', (_event, pack) => isModelPackInstalled(pack))
+  handle('stems:separate', (event, srcPath, pack, opts) =>
+    separateTrack(srcPath, pack, opts, (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('evt:stems-progress', { jobKey: opts.jobKey, progress })
+      }
+    })
+  )
+  handle('stems:cancel', (_event, jobKey) => {
+    cancelStemsJob(jobKey)
+  })
+  handle('stems:export', async (_event, wavPath, format, songName, stemName, folder) => ({
+    path: await exportStem(wavPath, format, songName, stemName, folder ?? 'Stems')
+  }))
+  handle('stems:open-folder', async (_event, folder) => {
+    const dir = stemsExportDir(folder ?? 'Stems')
+    await fsp.mkdir(dir, { recursive: true })
+    // openPath resolves to an error string on failure (e.g. Explorer racing a
+    // just-created dir → "Location is not available") — retry once.
+    const err = await shell.openPath(dir)
+    if (err) {
+      await new Promise((r) => setTimeout(r, 400))
+      await shell.openPath(dir)
+    }
+  })
+  handle('stems:mix', (_event, wavPaths, outName) => mixStems(wavPaths, outName))
+
+  handle('lyrics:write-sidecar', async (_event, filePath, lines) => ({
+    path: await writeLrcSidecar(filePath, lines)
+  }))
+  handle('lyrics:fetch-online', (_event, q) => fetchOnlineLyrics(q))
 
   handle('addons:list', () => listInstalled())
   handle('addons:catalog', () => browseAddons())

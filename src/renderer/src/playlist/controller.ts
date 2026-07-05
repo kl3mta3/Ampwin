@@ -5,6 +5,8 @@
 import type {
   PlayerSnapshot,
   PlayState,
+  Playlist,
+  PlaylistMeta,
   RepeatMode,
   Track,
   TrackProbe,
@@ -15,6 +17,7 @@ import { Emitter } from '../emitter'
 import { AudioEngine } from '../audio/engine'
 import type { VisualizerHost, VideoState } from '../viz/host'
 import { PlaylistModel } from './model'
+import { youtubeId } from '../viz/embedPlayer'
 
 const PRELOAD_AHEAD_SEC = 15
 const MAX_CONSECUTIVE_ERRORS = 3
@@ -53,7 +56,8 @@ export function trackFromProbe(p: TrackProbe): Track {
     isVideo: p.isVideo,
     mtimeMs: p.mtimeMs,
     missing: !p.ok && !p.unreadable,
-    unreadable: p.unreadable
+    unreadable: p.unreadable,
+    lyrics: p.lyrics
   }
 }
 
@@ -142,6 +146,10 @@ export class PlayerController {
   private videoMode = false
   private lastVideoState: PlayState = 'idle'
   private videoState: VideoState | null = null
+  /** Remote video plays DIRECTLY in <video> first (no ffmpeg); if the element
+   *  rejects the resolved URL, this remembers what to re-route through the
+   *  ffmpeg→MSE stream instead of skipping the track. */
+  private remoteFallback: { url: string; durationSec: number; trackId: string } | null = null
 
   attachVizHost(host: VisualizerHost): void {
     this.vizHost = host
@@ -167,6 +175,25 @@ export class PlayerController {
     host.events.on('videoError', (msg) => {
       if (!this.videoMode) return
       const track = this.model.getCurrentTrack()
+      // A remote video we tried to play DIRECTLY failed to decode in <video>
+      // (odd container/codec, or an HLS/DASH URL Chromium won't take raw) —
+      // re-route it once through the ffmpeg→MSE stream before giving up. This
+      // keeps the fast path (no ffmpeg) for the common progressive-MP4 case.
+      const fb = this.remoteFallback
+      if (fb && track && fb.trackId === track.id) {
+        this.remoteFallback = null
+        this.vizHost?.showVideoStream(fb.url, fb.durationSec, {
+          positionSec: 0,
+          volume: this.videoVolume()
+        })
+        return
+      }
+      // Direct + ffmpeg-stream both failed — last resort is the YouTube embed.
+      const embedId = track?.isRemote ? youtubeId(track.path) : null
+      if (embedId && this.vizHost && this.vizHost.getDebugInfo().mode !== 'embed') {
+        this.vizHost.showEmbed(embedId, { volume: this.videoVolume() })
+        return
+      }
       this.events.emit('error', `video: ${msg}`, track)
       this.consecutiveErrors++
       if (this.consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
@@ -241,6 +268,14 @@ export class PlayerController {
     if (!track || track.missing || track.unreadable) return
     this.model.setCurrentIndex(index)
     this.events.emit('track', track)
+    this.remoteFallback = null // any pending direct→stream fallback is stale now
+
+    // Stop the currently-playing video/embed right away so it doesn't keep
+    // playing while the next track resolves (a YouTube stream resolve, or an
+    // ffmpeg conversion, can take a few seconds). Without this, switching from a
+    // playing video appears to hang for those seconds unless you pause it first.
+    // The surface goes black as a loading state until the next source is ready.
+    if (this.videoMode && this.vizHost) this.vizHost.stopCurrentVideo()
 
     // Remote link (YouTube etc.): resolve a fresh stream URL each play, since
     // resolved URLs expire. The result routes into the normal audio/video path.
@@ -258,14 +293,25 @@ export class PlayerController {
         const { streamUrl } = await native.invoke('link:resolve', track.path, !!track.audioOnly)
         if (this.model.getCurrentTrack()?.id !== track.id) return
         if (isVideo && this.vizHost) {
-          this.vizHost.showVideoStream(streamUrl, track.durationSec, {
-            positionSec: 0,
-            volume: this.videoVolume()
-          })
+          // Play the resolved URL DIRECTLY in <video> — YouTube's progressive
+          // MP4 needs no ffmpeg. If the element can't decode it, videoError
+          // re-routes this same URL through the ffmpeg→MSE stream (see above).
+          this.remoteFallback = { url: streamUrl, durationSec: track.durationSec, trackId: track.id }
+          this.vizHost.showVideo(streamUrl, { positionSec: 0, volume: this.videoVolume() })
         } else {
           await this.engine.load(streamUrl, { autoplay: true })
         }
       } catch (err) {
+        // Couldn't extract a stream (DRM / region / format wall). If it's a
+        // YouTube video, fall back to YouTube's own embedded player — passive
+        // (no stems/download/visualizer) but it plays what we can't extract.
+        const id = isVideo && this.vizHost ? youtubeId(track.path) : null
+        if (id && this.vizHost) {
+          this.remoteFallback = null
+          if (!this.videoMode) this.enterVideoMode()
+          this.vizHost.showEmbed(id, { volume: this.videoVolume() })
+          return
+        }
         this.exitVideoMode()
         this.events.emit('state', 'idle')
         this.events.emit('error', linkErrorMessage(err as Error), track)
@@ -377,6 +423,21 @@ export class PlayerController {
       this.events.emit('error', `download failed: ${(err as Error).message}`, track)
       return null
     }
+  }
+
+  /** List the saved (named) playlists — used by "Add to playlist" menus. */
+  listSavedPlaylists(): Promise<PlaylistMeta[]> {
+    return native.invoke('store:playlists:list')
+  }
+
+  /** Append tracks to an existing saved playlist (does NOT touch the current
+   *  playlist). Used by the "Add to playlist ▸ <name>" context-menu entries. */
+  async addTracksToSavedPlaylist(id: string, tracks: Track[]): Promise<void> {
+    if (!tracks.length) return
+    const pl: Playlist = await native.invoke('store:playlists:get', id)
+    pl.tracks = [...pl.tracks, ...tracks]
+    pl.updatedAt = Date.now()
+    await native.invoke('store:playlists:save', pl)
   }
 
   /** Convert a local file to a chosen format (saved to downloads/Converted).

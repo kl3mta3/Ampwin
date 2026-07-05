@@ -73,6 +73,14 @@ A normal HTML document. Relative URLs (`<link href="skin.css">`, `<img src="logo
 - When your UI is initialized, you **must call `ampwin.ready()`**. Skins that don't call it within **5 seconds** are rejected and the player reverts to the default skin.
 - A JavaScript error thrown *before* `ready()` also rejects the skin. Errors after `ready()` are logged but not fatal.
 - The player window is **frameless** — your skin draws all the chrome, including window-drag areas and min/close buttons (see §5).
+- The player window is **transparent**: whatever your document doesn't paint
+  shows the desktop through. For a classic rectangular skin, give `body` an
+  opaque `background` (the default and lite skins do). For an **irregular /
+  shaped skin**, leave `html`/`body` transparent and draw your shape with
+  normal elements, `border-radius`, `clip-path`, or a PNG — the empty areas
+  are see-through. Note: see-through areas still belong to the window (clicks
+  there hit the window, not the desktop behind it), so keep your window size
+  close to your drawn shape.
 - Switching skins never interrupts audio: the audio engine lives outside your document.
 
 Environment notes:

@@ -4,6 +4,7 @@ import { parseFile, selectCover } from 'music-metadata'
 import type { TrackProbe, Verdict } from '../shared/types'
 import { NATIVE_AUDIO_EXTS, extOf, isVideoPath } from '../shared/formats'
 import { ffprobeDuration, videoPlanFor } from './ffmpeg/probe'
+import { lyricsFromCommonLyrics, readLrcSidecar } from './lyrics/lrc'
 
 // Codec substrings Chromium cannot decode even when the container looks
 // native (the .m4a/ALAC trap, .ogg/Speex, non-PCM .wav).
@@ -83,6 +84,8 @@ export async function probeFile(path: string): Promise<TrackProbe> {
     const codec = meta.format.codec ?? meta.format.container ?? ''
     let durationSec = meta.format.duration ?? 0
     if (durationSec <= 0) durationSec = (await ffprobeDuration(path)) ?? 0
+    // A .lrc sidecar (e.g. written by karaokefy) wins over embedded tags.
+    const lyrics = (await readLrcSidecar(path)) ?? lyricsFromCommonLyrics(meta.common.lyrics) ?? undefined
     return {
       path,
       ok: true,
@@ -93,7 +96,8 @@ export async function probeFile(path: string): Promise<TrackProbe> {
       codec,
       verdict: verdictFor(path, codec, isVideo),
       isVideo,
-      mtimeMs
+      mtimeMs,
+      lyrics
     }
   } catch {
     // music-metadata couldn't parse it (some exotic formats); ffmpeg may

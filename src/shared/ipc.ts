@@ -5,6 +5,11 @@
 import type {
   AddonInfo,
   ImportedPlaylist,
+  LyricLine,
+  Lyrics,
+  StemModelPack,
+  StemsProgress,
+  StemsResult,
   LinkProbe,
   Playlist,
   PlaylistMeta,
@@ -64,6 +69,36 @@ export interface IpcInvokeMap {
   'presets:list-user': { args: []; result: PresetInfo[] }
   'presets:read': { args: [id: string]; result: unknown }
   'presets:import-files': { args: [paths: string[]]; result: PresetInfo[] }
+
+  // ---- stems (HTDemucs separation; used by the demucs addons) --------------
+  /** Are all of a pack's model files already downloaded? */
+  'stems:model-installed': { args: [pack: StemModelPack]; result: boolean }
+  /** Separate a local file into stems (downloads models on first use; emits
+   *  evt:stems-progress keyed by jobKey). Serialized app-wide. */
+  'stems:separate': {
+    args: [srcPath: string, pack: StemModelPack, opts: { useGpu: boolean; force: boolean; jobKey: string }]
+    result: StemsResult
+  }
+  'stems:cancel': { args: [jobKey: string]; result: void }
+  /** Encode a cached stem WAV into downloads/<folder>/<song>/<stem>.<format>
+   *  (folder defaults to 'Stems'; karaokefy passes 'Karaoke'). */
+  'stems:export': {
+    args: [wavPath: string, format: 'wav' | 'flac' | 'mp3', songName: string, stemName: string, folder?: string]
+    result: { path: string }
+  }
+  'stems:open-folder': { args: [folder?: string]; result: void }
+  /** Mix WAV stems into one instrumental WAV beside them (karaokefy). */
+  'stems:mix': { args: [wavPaths: string[], outName: string]; result: { path: string; url: string } }
+
+  // ---- lyrics --------------------------------------------------------------
+  /** Write an .lrc sidecar next to an audio file (same basename). Karaokefy uses
+   *  it for the karaoke file it exported into the app's downloads folder. */
+  'lyrics:write-sidecar': { args: [filePath: string, lines: LyricLine[]]; result: { path: string } }
+  /** Fetch human-made synced lyrics from LRCLIB (cached in userData). null on miss. */
+  'lyrics:fetch-online': {
+    args: [q: { artist?: string; title: string; album?: string; durationSec?: number }]
+    result: Lyrics | null
+  }
 
   // ---- addons --------------------------------------------------------------
   /** Installed addons only (no network) — the boot loader reads this. */
@@ -151,6 +186,7 @@ export interface IpcEventMap {
   'evt:download-progress': { url: string; percent: number; phase: string }
   'evt:convert-progress': { srcPath: string; percent: number }
   'evt:addon-progress': { id: string; percent: number }
+  'evt:stems-progress': { jobKey: string; progress: StemsProgress }
 }
 
 export type InvokeChannel = keyof IpcInvokeMap

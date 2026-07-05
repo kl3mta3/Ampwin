@@ -4,6 +4,22 @@ export type RepeatMode = 'off' | 'all' | 'one'
 export type PlayState = 'idle' | 'loading' | 'playing' | 'paused'
 export type Verdict = 'native' | 'transcode' | 'unsupported'
 
+/** One lyric line. `timeMs` is the start time for synced lyrics, null when the
+ *  source is a plain unsynchronized block (shown but not highlighted). */
+export interface LyricLine {
+  timeMs: number | null
+  text: string
+}
+
+/** Lyrics for a track, from embedded tags, a .lrc sidecar, or a live
+ *  (transcription) source. `synced` means the lines carry usable timestamps. */
+export interface Lyrics {
+  synced: boolean
+  source: 'embedded' | 'lrc' | 'live'
+  lines: LyricLine[]
+}
+
+
 export interface Track {
   id: string
   /** Local absolute path, or an http(s) URL for a remote/link track. */
@@ -24,6 +40,8 @@ export interface Track {
   isRemote?: boolean
   /** For remote tracks: user asked for audio only (a video link played as audio). */
   audioOnly?: boolean
+  /** Embedded/sidecar lyrics found at probe time, shown over the visualizer. */
+  lyrics?: Lyrics
 }
 
 export interface LinkProbe {
@@ -59,6 +77,7 @@ export interface TrackProbe {
   verdict: Verdict
   isVideo: boolean
   mtimeMs: number
+  lyrics?: Lyrics
 }
 
 export interface Playlist {
@@ -150,6 +169,42 @@ export interface AddonInfo {
   updateAvailable?: boolean
 }
 
+// ---- stems (HTDemucs ONNX separation) ---------------------------------------
+
+/** Describes an ONNX model pack an addon wants the stems engine to run.
+ *  'single' = one file emitting every stem; 'bag' = one specialist file per
+ *  stem (htdemucs_ft), each file's own stem row is kept. */
+export interface StemModelPack {
+  /** Safe id ([a-z0-9-]) — names the userData/models/<id> folder. */
+  id: string
+  /** Human label, e.g. "Demucs v4 (ft)". */
+  label: string
+  kind: 'single' | 'bag'
+  /** Stem names in the model's output-row order. */
+  sources: string[]
+  files: {
+    /** https download URL (HuggingFace resolve link etc.). */
+    url: string
+    /** On-disk filename inside the pack folder. */
+    file: string
+    /** bag only: which stem this specialist file is fine-tuned for. */
+    stem?: string
+  }[]
+}
+
+export interface StemsProgress {
+  phase: 'download' | 'decode' | 'separate' | 'finalize'
+  percent: number
+  detail?: string
+}
+
+export interface StemsResult {
+  /** stem name → cached WAV path + ampwin:// URL playable in an <audio>. */
+  stems: Record<string, { path: string; url: string }>
+  fromCache: boolean
+  sampleRate: number
+}
+
 export interface PresetInfo {
   id: string
   name: string
@@ -162,6 +217,14 @@ export interface VizCycleOptions {
   random: boolean
 }
 
+/** Graphic-EQ state: on/off, preamp (dB), and per-band gains (dB), band order
+ *  matching the engine's fixed frequencies (31 Hz … 16 kHz). */
+export interface EqSettings {
+  enabled: boolean
+  preamp: number
+  bands: number[]
+}
+
 export interface Settings {
   volume: number
   muted: boolean
@@ -171,6 +234,10 @@ export interface Settings {
   activeVisualizer: string
   vizPresetId: string | null
   vizCycle: VizCycleOptions
+  /** Show synced lyrics (metadata/.lrc/live) over the visualizer. */
+  showLyrics: boolean
+  /** Graphic equalizer state. */
+  eq: EqSettings
   windowBounds: { x: number; y: number; width: number; height: number } | null
   cacheMaxBytes: number
   /** Crash-loop guard: forced back to default skin after 2 boot crashes. */
@@ -190,6 +257,8 @@ export const DEFAULT_SETTINGS: Settings = {
   activeVisualizer: 'butterchurn',
   vizPresetId: null,
   vizCycle: { enabled: true, intervalSec: 25, random: true },
+  showLyrics: true,
+  eq: { enabled: false, preamp: 0, bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
   windowBounds: null,
   // Video conversions are multi-GB; a small cap would thrash them out.
   cacheMaxBytes: 8 * 1024 * 1024 * 1024,

@@ -13,11 +13,16 @@
 
 import type {
   AddonInfo,
+  LyricLine,
+  Lyrics,
   PlayerSnapshot,
   PlayState,
   PresetInfo,
   RepeatMode,
   SkinInfo,
+  StemModelPack,
+  StemsProgress,
+  StemsResult,
   Track,
   YtSearchResult
 } from './types'
@@ -94,8 +99,13 @@ export interface AmpwinApi {
       list(): Promise<{ id: string; name: string; trackCount: number }[]>
       /** Replaces the current playlist. */
       load(id: string): Promise<void>
-      saveCurrentAs(name: string): Promise<string>
+      /** Save the current playlist under `name`. Pass `existingId` to overwrite
+       *  that saved playlist in place; omit it to create a new one. Returns id. */
+      saveCurrentAs(name: string, existingId?: string): Promise<string>
       delete(id: string): Promise<void>
+      /** Append tracks to an existing saved playlist (leaves the current playlist
+       *  untouched). Used by "Add to playlist ▸ <name>". */
+      addTracksTo(id: string, tracks: Track[]): Promise<void>
       /** File dialog → .m3u/.m3u8/.pls import. */
       importFromFile(): Promise<void>
       exportToFile(fmt?: 'm3u8' | 'm3u'): Promise<void>
@@ -161,6 +171,51 @@ export interface AmpwinApi {
     openSkinsFolder(): void
   }
 
+  /** Track context-menu extension point. Addons register entries (a labeled
+   *  submenu of actions for LOCAL files); skins list + render them in their
+   *  right-click menu and route clicks via invokeTrackMenu. Registrations die
+   *  with the registering skin/addon instance. */
+  menus: {
+    /** Addon side: contribute "Label ▸ item, item…" to the track menu. */
+    registerTrackMenu(spec: {
+      label: string
+      items: { label: string; action: (track: Track) => void }[]
+    }): Unsubscribe
+    /** Skin side: entries applicable to this track (empty for remote/broken). */
+    listTrackMenus(track: Track): { key: string; label: string; items: { key: string; label: string }[] }[]
+    invokeTrackMenu(menuKey: string, itemKey: string, track: Track): void
+    on(ev: 'changed', cb: () => void): Unsubscribe
+  }
+
+  /** HTDemucs stem separation (used by the demucs addons). Models download on
+   *  first use into userData/models; results cache as WAVs and re-runs are
+   *  instant unless force. Only one separation runs at a time app-wide. */
+  stems: {
+    isModelInstalled(pack: StemModelPack): Promise<boolean>
+    /** Rejects with a reason ("cancelled", "another separation is running…"). */
+    separate(
+      track: Track,
+      pack: StemModelPack,
+      opts?: { useGpu?: boolean; force?: boolean; jobKey?: string }
+    ): Promise<StemsResult>
+    cancel(jobKey: string): void
+    /** Encode a result WAV to downloads/<folder>/<song>/<stem>.<format>.
+     *  `folder` defaults to 'Stems' (karaokefy passes its own, e.g. 'Karaoke'). */
+    export(
+      wavPath: string,
+      format: 'wav' | 'flac' | 'mp3',
+      songName: string,
+      stemName: string,
+      folder?: string
+    ): Promise<string>
+    /** Sum WAV stems into one instrumental WAV beside them (drums+bass+other →
+     *  instrumental). Returns its path + an ampwin:// URL for an <audio>. */
+    mix(wavPaths: string[], outName: string): Promise<{ path: string; url: string }>
+    /** Open the downloads folder (defaults to 'Stems'; pass a name for others). */
+    openFolder(folder?: string): void
+    on(ev: 'progress', cb: (jobKey: string, p: StemsProgress) => void): Unsubscribe
+  }
+
   /** System-audio visualizer mode: drive the visualizer from the computer's
    *  entire audio output (WASAPI loopback) instead of Ampwin's own playback —
    *  so it reacts to Spotify, a browser, a game, anything. Enabling pauses
@@ -174,6 +229,53 @@ export interface AmpwinApi {
     disable(): void
     toggle(): Promise<void>
     on(ev: 'change', cb: (enabled: boolean) => void): Unsubscribe
+  }
+
+  /** On-screen lyrics over the visualizer, synced to playback (highlighting the
+   *  current line). Reads embedded/.lrc lyrics from the current track
+   *  automatically; addons can also stream live lines (e.g. a transcription)
+   *  that override the track's until cleared. State is app-wide + persisted. */
+  lyrics: {
+    /** True when the current track (or a live source) has lyrics to show. */
+    isAvailable(): boolean
+    isEnabled(): boolean
+    /** Toggle the overlay (persisted across skins). */
+    setEnabled(on: boolean): void
+    /** Stream live lyric lines onto the overlay (auto-lyrics addon); overrides the
+     *  track's own lyrics until clearLive(). `synced` defaults to true — pass
+     *  lines with `timeMs` set for highlighting. */
+    pushLive(lines: LyricLine[], opts?: { synced?: boolean }): void
+    clearLive(): void
+    /** Write an .lrc sidecar next to an audio file (same basename) so a player
+     *  reads it directly. Karaokefy uses it for the karaoke file it exports into
+     *  the app's own downloads folder — never the source. Returns the .lrc path. */
+    writeSidecar(filePath: string, lines: LyricLine[]): Promise<string>
+    /** Fetch human-made synced lyrics from LRCLIB for a track (cached). Returns
+     *  null if nothing matches — the reliable primary source; transcription is a
+     *  fallback. */
+    fetchOnline(track: Track): Promise<Lyrics | null>
+    on(ev: 'change', cb: (enabled: boolean) => void): Unsubscribe
+    on(ev: 'available', cb: (available: boolean) => void): Unsubscribe
+  }
+
+  /** Realtime 10-band graphic equalizer on the app's own playback (Web Audio
+   *  peaking filters + a preamp). Band order matches frequencies(); gains are in
+   *  dB within range(). State persists in settings. */
+  eq: {
+    /** Band center frequencies (Hz), low → high. */
+    frequencies(): number[]
+    /** Allowed gain range in dB, e.g. { min: -12, max: 12 }. */
+    range(): { min: number; max: number }
+    isEnabled(): boolean
+    setEnabled(on: boolean): void
+    /** Per-band gains in dB, in frequencies() order. */
+    getGains(): number[]
+    setGain(index: number, db: number): void
+    setGains(db: number[]): void
+    getPreamp(): number
+    setPreamp(db: number): void
+    /** Flat: all bands + preamp to 0 dB. */
+    reset(): void
   }
 
   /** Addons: user-installable extensions (a folder with addon.json + JS) from a

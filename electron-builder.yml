@@ -10,6 +10,15 @@ directories:
   buildResources: build
 files:
   - out/**
+  - package.json
+  # electron-builder auto-collects production dependencies (onnxruntime-node,
+  # used by the stems engine, + transitive deps). Strip the non-win-x64 native
+  # binaries it ships for other platforms.
+  - "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
+asarUnpack:
+  - node_modules/onnxruntime-node/bin/**
 extraResources:
   - from: skins
     to: skins
@@ -32,7 +41,7 @@ win:
         - x64
   icon: build/icon.png
 portable:
-  artifactName: ${productName}-${version}-portable.exe
+  artifactName: ${productName} ${version}.exe
 fileAssociations:
   - ext: mp3
     name: MP3 Audio
@@ -57,3 +66,4 @@ fileAssociations:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  artifactName: ${productName} Installer ${version}.exe

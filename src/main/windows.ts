@@ -8,7 +8,8 @@ let mainWindow: BrowserWindow | null = null
 // Everything else is denied — no skin gets to open arbitrary windows.
 const POPOUT_OPTS: Record<string, { width: number; height: number; minWidth: number; minHeight: number }> = {
   'ampwin-viz': { width: 640, height: 420, minWidth: 300, minHeight: 220 },
-  'ampwin-playlist': { width: 440, height: 600, minWidth: 300, minHeight: 320 }
+  'ampwin-playlist': { width: 440, height: 600, minWidth: 300, minHeight: 320 },
+  'ampwin-eq': { width: 600, height: 360, minWidth: 460, minHeight: 300 }
 }
 const popouts = new Map<string, BrowserWindow>()
 
@@ -36,15 +37,21 @@ export function createMainWindow(bounds?: { x: number; y: number; width: number;
       )
     })
 
+  const winW = usable ? bounds!.width : 680
+  const winH = usable ? bounds!.height : 560
+
   mainWindow = new BrowserWindow({
-    width: usable ? bounds!.width : 680,
-    height: usable ? bounds!.height : 560,
+    width: winW,
+    height: winH,
     x: usable ? bounds!.x : undefined,
     y: usable ? bounds!.y : undefined,
     minWidth: 480,
     minHeight: 320,
     frame: false,
-    backgroundColor: '#000000',
+    // Transparent so irregular-shaped skins show the desktop through their
+    // empty areas instead of a black box. Regular skins (default, lite) paint
+    // opaque backgrounds and look exactly as before. Must be set at creation.
+    transparent: true,
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -53,7 +60,21 @@ export function createMainWindow(bounds?: { x: number; y: number; width: number;
     }
   })
 
-  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow) return
+    // Transparent + frameless windows can open at the wrong size (or maximized)
+    // in packaged builds on some Windows configs, ignoring the constructor size.
+    // Force the intended size here BEFORE showing — idempotent when correct.
+    const wasMax = mainWindow.isMaximized()
+    if (wasMax) mainWindow.unmaximize()
+    const b = mainWindow.getBounds()
+    // >8px slop absorbs the frameless border delta; real breakage is 100s of px.
+    if (wasMax || Math.abs(b.width - winW) > 8 || Math.abs(b.height - winH) > 8) {
+      console.error(`[win] correcting boot size ${b.width}x${b.height} → ${winW}x${winH} (maximized=${wasMax})`)
+      mainWindow.setSize(winW, winH)
+    }
+    mainWindow.show()
+  })
 
   let boundsTimer: NodeJS.Timeout | null = null
   const saveBounds = (): void => {
@@ -74,7 +95,13 @@ export function createMainWindow(bounds?: { x: number; y: number; width: number;
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ frameName }) => {
-    const opts = POPOUT_OPTS[frameName]
+    // Addon-owned windows (stems viewer, settings, …): any 'ampwin-addon-*'
+    // frame name is allowed with a standard resizable frame. Addons are
+    // user-installed and already run with the full API, so this grants
+    // nothing new — it just lets them present UI.
+    const opts = POPOUT_OPTS[frameName] ?? (frameName.startsWith('ampwin-addon-')
+      ? { width: 760, height: 600, minWidth: 420, minHeight: 300 }
+      : null)
     if (opts) {
       return {
         action: 'allow',

@@ -22,6 +22,13 @@ export type SurfaceMount =
 export class VizSurface {
   readonly canvas: HTMLCanvasElement
   readonly video: HTMLVideoElement
+  /** YouTube-embed fallback player (for videos we can't extract a stream for).
+   *  pointer-events:auto so YouTube's own controls are clickable even in the
+   *  click-through overlay mount. */
+  readonly embed: HTMLIFrameElement
+  /** Lyrics overlay layer — sits above the canvas/video, click-through. Populated
+   *  by the host-owned LyricsOverlay; re-attached on every remount. */
+  readonly lyrics: HTMLDivElement
   /** The window whose devicePixelRatio / rAF this surface lives in. */
   readonly view: Window & typeof globalThis
 
@@ -37,12 +44,21 @@ export class VizSurface {
     this.container = doc.createElement('div')
     this.canvas = doc.createElement('canvas')
     this.video = doc.createElement('video')
+    this.embed = doc.createElement('iframe')
+    this.lyrics = doc.createElement('div')
     this.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block'
     this.video.style.cssText =
       'position:absolute;inset:0;width:100%;height:100%;display:none;object-fit:contain;background:#000'
     this.video.setAttribute('playsinline', '')
+    this.embed.style.cssText =
+      'position:absolute;inset:0;width:100%;height:100%;display:none;border:none;background:#000;pointer-events:auto'
+    this.embed.setAttribute('allow', 'autoplay; encrypted-media; fullscreen; picture-in-picture')
+    this.embed.setAttribute('allowfullscreen', '')
+    this.lyrics.style.cssText = 'position:absolute;inset:0;pointer-events:none;display:none;z-index:2'
     this.container.appendChild(this.canvas)
     this.container.appendChild(this.video)
+    this.container.appendChild(this.embed)
+    this.container.appendChild(this.lyrics)
 
     if (mount.kind === 'own') {
       this.container.style.cssText = 'position:absolute;inset:0;background:#000;overflow:hidden'
@@ -77,12 +93,20 @@ export class VizSurface {
 
   showVideo(): void {
     this.canvas.style.display = 'none'
+    this.embed.style.display = 'none'
     this.video.style.display = 'block'
   }
 
   showCanvas(): void {
     this.video.style.display = 'none'
+    this.embed.style.display = 'none'
     this.canvas.style.display = 'block'
+  }
+
+  showEmbed(): void {
+    this.canvas.style.display = 'none'
+    this.video.style.display = 'none'
+    this.embed.style.display = 'block'
   }
 
   destroy(): void {
@@ -99,6 +123,7 @@ export class VizSurface {
     }
     this.video.removeAttribute('src')
     this.video.load()
+    this.embed.removeAttribute('src')
     this.container.remove()
   }
 }
