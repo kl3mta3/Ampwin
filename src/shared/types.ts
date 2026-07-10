@@ -44,6 +44,31 @@ export interface Track {
   lyrics?: Lyrics
 }
 
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'
+
+export interface HttpRequestOptions {
+  url: string
+  method?: HttpMethod
+  headers?: Record<string, string>
+  /** Text request body. JSON callers should also set Content-Type. */
+  body?: string
+  /** Overall deadline. Defaults to 15 seconds; clamped to 1–120 seconds. */
+  timeoutMs?: number
+  /** Text is UTF-8. Use base64 for images or other binary responses. */
+  responseType?: 'text' | 'base64'
+}
+
+export interface HttpResponse {
+  ok: boolean
+  status: number
+  statusText: string
+  /** Final URL after redirects. */
+  url: string
+  headers: Record<string, string>
+  /** UTF-8 text or base64, according to responseType. */
+  body: string
+}
+
 export interface LinkProbe {
   ok: boolean
   error?: string

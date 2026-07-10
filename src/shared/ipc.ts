@@ -20,7 +20,9 @@ import type {
   SkinInfo,
   SkinWindowSpec,
   TrackProbe,
-  YtSearchResult
+  YtSearchResult,
+  HttpRequestOptions,
+  HttpResponse
 } from './types'
 
 export type DialogFilterKind = 'media' | 'audio' | 'video' | 'playlist' | 'preset'
@@ -99,6 +101,10 @@ export interface IpcInvokeMap {
     args: [q: { artist?: string; title: string; album?: string; durationSec?: number }]
     result: Lyrics | null
   }
+
+ // ---- trusted addon/skin networking --------------------------------------
+  /** Main-process HTTP(S), unaffected by renderer CSP/CORS. */
+  'network:request': { args: [options: HttpRequestOptions]; result: HttpResponse }
 
   // ---- addons --------------------------------------------------------------
   /** Installed addons only (no network) — the boot loader reads this. */

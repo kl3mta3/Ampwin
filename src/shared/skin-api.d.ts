@@ -24,7 +24,9 @@ import type {
   StemsProgress,
   StemsResult,
   Track,
-  YtSearchResult
+  YtSearchResult,
+  HttpRequestOptions,
+  HttpResponse
 } from './types'
 
 export type Unsubscribe = () => void
@@ -310,6 +312,11 @@ export interface AmpwinApi {
   /** Remote sources: paste a URL or search YouTube. YouTube needs yt-dlp,
    *  which downloads on first use. Links are added to the playlist like files
    *  and re-resolve on each play (URLs expire). */
+   
+     /** HTTP(S) for trusted installed skins/addons. Runs in the main process. */
+  network: {
+    request(options: HttpRequestOptions): Promise<HttpResponse>}
+   
   links: {
     /** Is yt-dlp already present (no download needed)? */
     ytdlpInstalled(): Promise<boolean>

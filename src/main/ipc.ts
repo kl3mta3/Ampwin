@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
 import { existsSync, promises as fsp } from 'fs'
 import { basename, dirname, extname, join } from 'path'
 import type { DialogFilterKind, FileFilter, IpcInvokeMap } from '../shared/ipc'
@@ -322,6 +322,81 @@ export function registerIpcHandlers(): void {
     }
   })
   handle('stems:mix', (_event, wavPaths, outName) => mixStems(wavPaths, outName))
+
+
+handle('network:request', async (_event, options) => {
+    let parsed: URL
+    try {
+      parsed = new URL(options.url)
+    } catch {
+      throw new Error('network request URL is invalid')
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('network requests support only http: and https: URLs')
+    }
+
+    const method = (options.method ?? 'GET').toUpperCase() as
+      | 'GET'
+      | 'POST'
+      | 'PUT'
+      | 'PATCH'
+      | 'DELETE'
+      | 'HEAD'
+      | 'OPTIONS'
+    const timeoutMs = Math.min(120_000, Math.max(1_000, options.timeoutMs ?? 15_000))
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+    try {
+      const response = await net.fetch(parsed.toString(), {
+        method,
+        headers: options.headers,
+        body: method === 'GET' || method === 'HEAD' ? undefined : options.body,
+        redirect: 'follow',
+        signal: controller.signal
+      })
+
+      const chunks: Buffer[] = []
+      let total = 0
+      if (response.body) {
+        const reader = response.body.getReader()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          total += value.byteLength
+          if (total > 32 * 1024 * 1024) {
+            await reader.cancel('response exceeds 32 MiB')
+            throw new Error('network response exceeds 32 MiB')
+          }
+          chunks.push(Buffer.from(value))
+        }
+      }
+
+      const headers: Record<string, string> = {}
+      response.headers.forEach((value, key) => {
+        headers[key] = value
+      })
+      const bytes = Buffer.concat(chunks)
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        url: response.url,
+        headers,
+        body: options.responseType === 'base64' ? bytes.toString('base64') : bytes.toString('utf8')
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(`network request timed out after ${timeoutMs} ms`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
+
 
   handle('lyrics:write-sidecar', async (_event, filePath, lines) => ({
     path: await writeLrcSidecar(filePath, lines)
