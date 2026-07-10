@@ -947,6 +947,98 @@
         : 'Show lyrics over the visualizer'
   }
   lyricsBtn.addEventListener('click', () => ampwin.lyrics.setEnabled(!ampwin.lyrics.isEnabled()))
+  
+   // Right-click Lyrics diagnostics: direct LRCLIB ping vs. Ampwin lookup path.
+  function showLyricsDiagnostic(message, isError = false) {
+    const title = $('title-text')
+    title.textContent = `${isError ? '⚠' : '✓'} ${message}`
+    title.title = message
+  }
+
+  async function pingLrclib() {
+    if (!ampwin.network?.request) {
+      showLyricsDiagnostic('This Ampwin build does not provide network.request', true)
+      return
+    }
+
+    const track = ampwin.player.getSnapshot().track
+    const query = track
+      ? `${track.title || ''} ${track.artist || ''}`.trim()
+      : 'Never Gonna Give You Up Rick Astley'
+    const started = performance.now()
+    showLyricsDiagnostic('Pinging LRCLIB…')
+
+    try {
+      const response = await ampwin.network.request({
+        url: `https://lrclib.net/api/search?q=${encodeURIComponent(query)}`,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Ampwin/1.0'
+        },
+        timeoutMs: 10_000
+      })
+      const elapsed = Math.round(performance.now() - started)
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`)
+      }
+
+      const results = JSON.parse(response.body)
+      if (!Array.isArray(results)) throw new Error('LRCLIB returned unexpected JSON')
+
+      showLyricsDiagnostic(
+        `LRCLIB online — HTTP ${response.status} — ${results.length} match(es) — ${elapsed} ms`
+      )
+    } catch (error) {
+      showLyricsDiagnostic(`LRCLIB ping failed: ${error?.message || error}`, true)
+    }
+  }
+
+  async function testCurrentLyricsLookup() {
+    const track = ampwin.player.getSnapshot().track
+    if (!track) {
+      showLyricsDiagnostic('No current track to look up', true)
+      return
+    }
+
+    showLyricsDiagnostic(`Looking up lyrics for ${track.title}…`)
+    let timer = null
+
+    try {
+      const lyrics = await Promise.race([
+        ampwin.lyrics.fetchOnline(track),
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('Ampwin lyrics lookup did not settle within 15 seconds')),
+            15_000
+          )
+        })
+      ])
+
+      if (!lyrics?.lines?.length) {
+        showLyricsDiagnostic('Ampwin lookup completed — no matching lyrics', true)
+        return
+      }
+
+      showLyricsDiagnostic(
+        `Ampwin lookup working — ${lyrics.lines.length} ${lyrics.synced ? 'synced' : 'plain'} line(s)`
+      )
+    } catch (error) {
+      showLyricsDiagnostic(`Ampwin lookup failed: ${error?.message || error}`, true)
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }
+
+  lyricsBtn.addEventListener('contextmenu', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    showMenu(event.clientX, event.clientY, [
+      { label: '⌁ Ping LRCLIB', action: () => void pingLrclib() },
+      { label: '🎤 Test current track lookup', action: () => void testCurrentLyricsLookup() }
+    ])
+  })
+  
   ampwin.lyrics.on('change', reflectLyrics)
   ampwin.lyrics.on('available', reflectLyrics)
   reflectLyrics()
