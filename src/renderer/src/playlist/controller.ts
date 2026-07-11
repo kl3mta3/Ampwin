@@ -297,7 +297,7 @@ export class PlayerController {
           // MP4 needs no ffmpeg. If the element can't decode it, videoError
           // re-routes this same URL through the ffmpeg→MSE stream (see above).
           this.remoteFallback = { url: streamUrl, durationSec: track.durationSec, trackId: track.id }
-          this.vizHost.showVideo(streamUrl, { positionSec: 0, volume: this.videoVolume() })
+          this.vizHost.showVideo(streamUrl, { positionSec: 0, volume: this.videoVolume(), durationSec: track.durationSec })
         } else {
           await this.engine.load(streamUrl, { autoplay: true })
         }
@@ -332,7 +332,7 @@ export class PlayerController {
         if (plan.direct) {
           const { url } = await native.invoke('media:prepare', track.path)
           if (!this.videoMode || this.model.getCurrentTrack()?.id !== track.id) return
-          this.vizHost.showVideo(url, { positionSec: 0, volume: this.videoVolume() })
+          this.vizHost.showVideo(url, { positionSec: 0, volume: this.videoVolume(), durationSec: plan.durationSec || track.durationSec })
         } else {
           // Progressive: starts playing immediately while ffmpeg converts
           // ahead of the playhead — no pre-conversion wait.

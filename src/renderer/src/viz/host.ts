@@ -255,6 +255,11 @@ export class VisualizerHost {
     | { kind: 'stream'; path: string; durationSec: number }
     | { kind: 'embed'; videoId: string }
     | null = null
+  /** Caller-provided duration (seconds) used as a fallback when the <video>
+   *  element doesn't report a finite duration (progressive/transcoded streams).
+   *  Set by showVideo / showVideoStream; YouTube and local files override this
+   *  once the element's own duration becomes available. */
+  private knownDuration = 0
   private streamPlayer: VideoStreamPlayer | null = null
   private embedPlayer: EmbedPlayer | null = null
   private videoPosition = 0
@@ -630,22 +635,20 @@ export class VisualizerHost {
   private emitVideoState(): void {
     const v = this.surface?.video
     if (!v) return
-    // Fall back to the known duration from the track metadata when the <video>
-    // element doesn't report a finite duration (e.g. progressive streams).
-    const knownDur = this.videoSrc?.kind === 'stream' ? this.videoSrc.durationSec : 0
     this.events.emit('videoState', {
       playing: !v.paused && !v.ended,
       position: v.currentTime,
-      duration: isFinite(v.duration) ? v.duration : knownDur
+      duration: isFinite(v.duration) ? v.duration : this.knownDuration
     })
   }
 
   /** Show a directly-playable video file on the active surface. */
-  showVideo(url: string, opts: { positionSec?: number; volume?: number } = {}): void {
+  showVideo(url: string, opts: { positionSec?: number; volume?: number; durationSec?: number } = {}): void {
     this.stopVideoPlayback()
     this.mode = 'video'
     this.videoSrc = { kind: 'url', url }
     this.videoPosition = opts.positionSec ?? 0
+    this.knownDuration = opts.durationSec ?? 0
     if (opts.volume != null) this.videoVolume = opts.volume
     this.applyMode()
     this.events.emit('visualizers', this.listVisualizers())
@@ -662,6 +665,7 @@ export class VisualizerHost {
     this.mode = 'video'
     this.videoSrc = { kind: 'stream', path, durationSec }
     this.videoPosition = opts.positionSec ?? 0
+    this.knownDuration = durationSec
     if (opts.volume != null) this.videoVolume = opts.volume
     this.applyMode()
     this.events.emit('visualizers', this.listVisualizers())
@@ -745,7 +749,7 @@ export class VisualizerHost {
     }
     const v = this.surface?.video
     if (!v) return
-    const dur = isFinite(v.duration) ? v.duration : Infinity
+    const dur = isFinite(v.duration) ? v.duration : (this.knownDuration || Infinity)
     v.currentTime = Math.min(Math.max(0, seconds), dur)
   }
 
