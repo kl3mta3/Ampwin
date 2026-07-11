@@ -42,14 +42,43 @@
       #addon-layer {
         display: none;
       }
+      /* Resize grab zones — invisible strips at window edges */
+      .rh { position: fixed; z-index: 2147483647; }
+      .rh-n  { top:0;    left:6px;  right:6px; height:6px; cursor:ns-resize; }
+      .rh-s  { bottom:0; left:6px;  right:6px; height:6px; cursor:ns-resize; }
+      .rh-w  { left:0;   top:6px;   bottom:6px; width:6px; cursor:ew-resize; }
+      .rh-e  { right:0;  top:6px;   bottom:6px; width:6px; cursor:ew-resize; }
+      .rh-nw { top:0;    left:0;  width:6px; height:6px; cursor:nwse-resize; }
+      .rh-ne { top:0;    right:0; width:6px; height:6px; cursor:nesw-resize; }
+      .rh-sw { bottom:0; left:0;  width:6px; height:6px; cursor:nesw-resize; }
+      .rh-se { bottom:0; right:0; width:6px; height:6px; cursor:nwse-resize; }
     </style>
   </head>
   <body>
+    <div class="rh rh-n"  data-dir="top"></div>
+    <div class="rh rh-s"  data-dir="bottom"></div>
+    <div class="rh rh-w"  data-dir="left"></div>
+    <div class="rh rh-e"  data-dir="right"></div>
+    <div class="rh rh-nw" data-dir="top-left"></div>
+    <div class="rh rh-ne" data-dir="top-right"></div>
+    <div class="rh rh-sw" data-dir="bottom-left"></div>
+    <div class="rh rh-se" data-dir="bottom-right"></div>
     <div id="skin-layer"></div>
     <div id="overlay-layer"></div>
     <div id="host-layer"></div>
     <!-- Enabled addons load here as hidden iframes (headless, full ampwin API). -->
     <div id="addon-layer"></div>
+    <script>
+      document.querySelectorAll('.rh').forEach(el => {
+        el.addEventListener('mousedown', e => {
+          e.preventDefault()
+          window.ampwinNative.invoke('window:start-resize', el.dataset.dir)
+        })
+      })
+      document.addEventListener('mouseup', () => {
+        window.ampwinNative.invoke('window:stop-resize')
+      })
+    </script>
     <script type="module" src="./src/shell.ts"></script>
   </body>
 </html>

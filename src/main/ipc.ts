@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, net, shell } from 'electron'
+import { BrowserWindow, dialog, ipcMain, net, screen, shell } from 'electron'
 import { existsSync, promises as fsp } from 'fs'
 import { basename, dirname, extname, join } from 'path'
 import type { DialogFilterKind, FileFilter, IpcInvokeMap } from '../shared/ipc'
@@ -457,6 +457,38 @@ handle('network:request', async (_event, options) => {
 
   handle('window:set-fullscreen', (event, on) => {
     windowOf(event)?.setFullScreen(on)
+  })
+
+  // ---- custom resize for frameless transparent windows (cross-platform) ----
+  let resizeInterval: ReturnType<typeof setInterval> | null = null
+
+  handle('window:start-resize', (event, direction) => {
+    const win = windowOf(event)
+    if (!win || !win.isResizable()) return
+    if (resizeInterval) { clearInterval(resizeInterval); resizeInterval = null }
+
+    const initial = win.getBounds()
+    const startCursor = screen.getCursorScreenPoint()
+    const [minW, minH] = win.getMinimumSize()
+
+    resizeInterval = setInterval(() => {
+      if (win.isDestroyed()) { clearInterval(resizeInterval!); resizeInterval = null; return }
+      const cursor = screen.getCursorScreenPoint()
+      const dx = cursor.x - startCursor.x
+      const dy = cursor.y - startCursor.y
+      const b = { ...initial }
+
+      if (direction.includes('right'))  b.width  = Math.max(minW, initial.width + dx)
+      if (direction.includes('bottom')) b.height = Math.max(minH, initial.height + dy)
+      if (direction.includes('left'))   { b.width = Math.max(minW, initial.width - dx); b.x = initial.x + initial.width - b.width }
+      if (direction.includes('top'))    { b.height = Math.max(minH, initial.height - dy); b.y = initial.y + initial.height - b.height }
+
+      win.setBounds(b)
+    }, 16)
+  })
+
+  handle('window:stop-resize', () => {
+    if (resizeInterval) { clearInterval(resizeInterval); resizeInterval = null }
   })
 
   handle('ytdlp:status', async () => ({ installed: await isInstalled() }))
