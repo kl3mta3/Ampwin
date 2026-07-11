@@ -1052,14 +1052,23 @@ export class VisualizerHost {
     doc.head.innerHTML = `<style>
       * { margin: 0; box-sizing: border-box; user-select: none; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-      #drag-top { height: 30px; -webkit-app-region: drag; background: transparent; position: relative; z-index: 10; }
-      #stage { width: 100%; height: calc(100% - 30px); position: relative; }
+      #stage { position: absolute; inset: 0; width: 100%; height: 100%; }
+      #drag-top {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 30px;
+        z-index: 2147483646;
+        background: transparent;
+        -webkit-app-region: drag;
+      }
     </style>`
     doc.body.innerHTML = '<div id="drag-top"></div><div id="stage"></div>'
     const stage = doc.getElementById('stage')!
 
     stage.addEventListener('dblclick', () => {
-      void native.invoke('window:set-fullscreen', !win.document.fullscreenElement)
+      void native.invoke('popout:toggle-fullscreen', 'ampwin-viz')
     })
 
     win.addEventListener('resize', () => this.refreshCanvasSize())

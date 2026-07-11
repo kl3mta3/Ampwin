@@ -53,7 +53,7 @@ import {
 import { writeLrcSidecar } from './lyrics/lrc'
 import { fetchOnlineLyrics } from './lyrics/online'
 import { parseM3u, parsePls, serializeM3u } from './playlistFormats'
-import { minimizePopout } from './windows'
+import { minimizePopout, togglePopoutFullscreen } from './windows'
 import { getSettings, patchSettings } from './store/settings'
 import {
   deletePlaylist,
@@ -439,6 +439,10 @@ handle('network:request', async (_event, options) => {
     minimizePopout(frameName)
   })
 
+  handle('popout:toggle-fullscreen', (_event, frameName) => {
+    return togglePopoutFullscreen(frameName)
+  })
+
   handle('window:toggle-devtools', (event) => {
     event.sender.toggleDevTools()
   })
@@ -470,7 +474,15 @@ handle('network:request', async (_event, options) => {
   })
 
   handle('window:set-bounds', (event, x, y, width, height) => {
-    windowOf(event)?.setBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) })
+    const win = windowOf(event)
+    if (!win) return
+    const cur = win.getBounds()
+    win.setBounds({
+      x: Math.round(x),
+      y: Math.round(y),
+      width: Math.round(width > 0 ? width : cur.width),
+      height: Math.round(height > 0 ? height : cur.height)
+    })
   })
 
   handle('ytdlp:status', async () => ({ installed: await isInstalled() }))

@@ -18,6 +18,15 @@ export function minimizePopout(frameName: string): void {
   if (w && !w.isDestroyed()) w.minimize()
 }
 
+export function togglePopoutFullscreen(frameName: string): boolean {
+  const w = popouts.get(frameName)
+  if (!w || w.isDestroyed()) return false
+
+  const on = !w.isFullScreen()
+  w.setFullScreen(on)
+  return on
+}
+
 export function createMainWindow(bounds?: { x: number; y: number; width: number; height: number } | null): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.focus()

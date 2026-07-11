@@ -122,6 +122,8 @@ export interface IpcInvokeMap {
   'window:apply-skin-spec': { args: [spec: SkinWindowSpec, includeSize: boolean]; result: void }
   /** Minimize a same-process pop-out window by its frame name. */
   'popout:minimize': { args: [frameName: string]; result: void }
+  /** Toggle fullscreen on a same-process pop-out by its frame name. */
+  'popout:toggle-fullscreen': { args: [frameName: string]; result: boolean }
   /** F12 — skin authors need to inspect their documents. */
   'window:toggle-devtools': { args: []; result: void }
   'window:minimize': { args: []; result: void }

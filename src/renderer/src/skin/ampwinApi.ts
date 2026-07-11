@@ -365,6 +365,10 @@ export function buildFacade(
       }) as AmpwinApi['convert']['on']
     },
 
+    network: {
+      request: (options) => native.invoke('network:request', options)
+    },
+
     links: {
       ytdlpInstalled: async () => (await native.invoke('ytdlp:status')).installed,
       ensureYtDlp: () => native.invoke('ytdlp:ensure'),
