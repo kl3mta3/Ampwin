@@ -999,11 +999,13 @@ export class VisualizerHost {
     doc.title = 'Ampwin Visualizer'
     // No static title bar — a single full-window stage with an auto-hiding
     // controls overlay (buttons + seek + volume) that appears on mouse move.
+    // The drag-top strip uses the same -webkit-app-region:drag as the bottom
+    // controls bar (which already works in this child window).
     doc.head.innerHTML = `<style>
       * { margin: 0; box-sizing: border-box; user-select: none; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-      #drag-top { height: 6px; -webkit-app-region: drag; background: transparent; }
-      #stage { width: 100%; height: calc(100% - 6px); position: relative; }
+      #drag-top { height: 30px; -webkit-app-region: drag; background: transparent; position: relative; z-index: 10; }
+      #stage { width: 100%; height: calc(100% - 30px); position: relative; }
     </style>`
     doc.body.innerHTML = '<div id="drag-top"></div><div id="stage"></div>'
     const stage = doc.getElementById('stage')!
