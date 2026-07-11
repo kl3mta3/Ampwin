@@ -630,10 +630,13 @@ export class VisualizerHost {
   private emitVideoState(): void {
     const v = this.surface?.video
     if (!v) return
+    // Fall back to the known duration from the track metadata when the <video>
+    // element doesn't report a finite duration (e.g. progressive streams).
+    const knownDur = this.videoSrc?.kind === 'stream' ? this.videoSrc.durationSec : 0
     this.events.emit('videoState', {
       playing: !v.paused && !v.ended,
       position: v.currentTime,
-      duration: isFinite(v.duration) ? v.duration : 0
+      duration: isFinite(v.duration) ? v.duration : knownDur
     })
   }
 
@@ -741,7 +744,9 @@ export class VisualizerHost {
       return
     }
     const v = this.surface?.video
-    if (v && isFinite(v.duration)) v.currentTime = Math.min(Math.max(0, seconds), v.duration)
+    if (!v) return
+    const dur = isFinite(v.duration) ? v.duration : Infinity
+    v.currentTime = Math.min(Math.max(0, seconds), dur)
   }
 
   setVideoVolume(vol: number): void {
