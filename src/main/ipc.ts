@@ -463,7 +463,7 @@ handle('network:request', async (_event, options) => {
 
   handle('window:start-resize', (event) => {
     const win = windowOf(event)
-    if (!win || !win.isResizable()) return null
+    if (!win) return null
     const b = win.getBounds()
     const [minWidth, minHeight] = win.getMinimumSize()
     return { x: b.x, y: b.y, width: b.width, height: b.height, minWidth, minHeight }
