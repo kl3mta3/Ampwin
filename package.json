@@ -1,6 +1,6 @@
 {
   "name": "ampwin",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Winamp-style media player with a MilkDrop-class visualizer, HTML/CSS/JS skins, and FFmpeg-backed format support",
   "main": "./out/main/index.js",
   "author": "Kenny",
