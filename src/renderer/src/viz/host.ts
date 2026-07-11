@@ -1002,9 +1002,10 @@ export class VisualizerHost {
     doc.head.innerHTML = `<style>
       * { margin: 0; box-sizing: border-box; user-select: none; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
-      #stage { width: 100%; height: 100%; position: relative; }
+      #drag-top { height: 6px; -webkit-app-region: drag; background: transparent; }
+      #stage { width: 100%; height: calc(100% - 6px); position: relative; }
     </style>`
-    doc.body.innerHTML = '<div id="stage"></div>'
+    doc.body.innerHTML = '<div id="drag-top"></div><div id="stage"></div>'
     const stage = doc.getElementById('stage')!
 
     win.addEventListener('resize', () => this.refreshCanvasSize())
