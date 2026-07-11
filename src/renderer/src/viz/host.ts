@@ -121,16 +121,53 @@ function mountControlsOverlay(
   }
   host.appendChild(bar)
 
+  // ---- center controls (back 10s, play/pause, forward 30s) ----------------
+  const CENTER_BTN =
+    '-webkit-app-region:no-drag;background:rgba(20,24,32,.75);color:#e6e9ef;' +
+    'border:2px solid rgba(255,255,255,.25);border-radius:50%;width:56px;height:56px;' +
+    'font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;' +
+    'transition:background .15s,border-color .15s'
+  const center = mk(
+    'div',
+    'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;' +
+      'display:flex;align-items:center;gap:28px;opacity:0;pointer-events:none;transition:opacity .25s'
+  )
+  const back10 = mk('button', CENTER_BTN)
+  back10.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2a10 10 0 1 1-7.07 2.93"/><polyline points="2 2 2 7 7 7"/><text x="12" y="16" fill="currentColor" stroke="none" font-size="8" text-anchor="middle" font-weight="bold">10</text></svg>'
+  back10.title = 'Back 10 seconds'
+  const centerPlay = mk('button', CENTER_BTN.replace('width:56px;height:56px', 'width:66px;height:66px').replace('font-size:20px', 'font-size:26px'))
+  centerPlay.textContent = '▶'
+  centerPlay.title = 'Play / Pause'
+  const fwd30 = mk('button', CENTER_BTN)
+  fwd30.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.5 2a10 10 0 1 0 7.07 2.93"/><polyline points="22 2 22 7 17 7"/><text x="12" y="16" fill="currentColor" stroke="none" font-size="8" text-anchor="middle" font-weight="bold">30</text></svg>'
+  fwd30.title = 'Forward 30 seconds'
+  center.append(back10, centerPlay, fwd30)
+  host.appendChild(center)
+
+  back10.addEventListener('click', () => { t.seek(Math.max(0, t.getPosition() - 10)) })
+  centerPlay.addEventListener('click', () => t.togglePlay())
+  fwd30.addEventListener('click', () => { t.seek(Math.min(t.getDuration(), t.getPosition() + 30)) })
+
+  // hover glow
+  for (const btn of [back10, centerPlay, fwd30]) {
+    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(40,50,65,.9)'; btn.style.borderColor = 'rgba(255,255,255,.5)' })
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(20,24,32,.75)'; btn.style.borderColor = 'rgba(255,255,255,.25)' })
+  }
+
   // ---- auto-hide -----------------------------------------------------------
   const view = doc.defaultView as Window & typeof globalThis
   let hideTimer: number | null = null
   const show = (): void => {
     bar.style.opacity = '1'
     bar.style.pointerEvents = 'auto'
+    center.style.opacity = '1'
+    center.style.pointerEvents = 'auto'
     if (hideTimer !== null) view.clearTimeout(hideTimer)
     hideTimer = view.setTimeout(() => {
       bar.style.opacity = '0'
       bar.style.pointerEvents = 'none'
+      center.style.opacity = '0'
+      center.style.pointerEvents = 'none'
     }, 2600)
   }
   host.addEventListener('mousemove', show)
@@ -139,6 +176,7 @@ function mountControlsOverlay(
   // ---- wiring --------------------------------------------------------------
   const setGlyph = (s: PlayState): void => {
     play.textContent = s === 'playing' ? '⏸' : '▶'
+    centerPlay.textContent = s === 'playing' ? '⏸' : '▶'
   }
   prev.addEventListener('click', () => t.previous())
   play.addEventListener('click', () => t.togglePlay())
@@ -179,6 +217,7 @@ function mountControlsOverlay(
     unVol()
     unPos()
     bar.remove()
+    center.remove()
   }
 }
 
@@ -1009,6 +1048,10 @@ export class VisualizerHost {
     </style>`
     doc.body.innerHTML = '<div id="drag-top"></div><div id="stage"></div>'
     const stage = doc.getElementById('stage')!
+
+    stage.addEventListener('dblclick', () => {
+      void native.invoke('window:set-fullscreen', !win.document.fullscreenElement)
+    })
 
     win.addEventListener('resize', () => this.refreshCanvasSize())
     win.addEventListener('unload', () => this.onPopoutClosed())
