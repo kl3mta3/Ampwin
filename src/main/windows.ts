@@ -48,8 +48,9 @@ export function createMainWindow(bounds?: { x: number; y: number; width: number;
     minWidth: 480,
     minHeight: 320,
     frame: false,
-    transparent: false,
-    thickFrame: true,
+    // Transparent so irregular-shaped skins show the desktop through their
+    // empty areas instead of a black box. Regular skins paint opaque backgrounds.
+    transparent: true,
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
