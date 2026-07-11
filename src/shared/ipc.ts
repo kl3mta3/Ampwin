@@ -129,10 +129,10 @@ export interface IpcInvokeMap {
   'window:set-size': { args: [width: number, height: number]; result: void }
   'window:set-always-on-top': { args: [on: boolean]; result: void }
   'window:set-fullscreen': { args: [on: boolean]; result: void }
-  /** Begin a custom resize from a window edge/corner (cross-platform).
-   *  Direction is one of: top, bottom, left, right, top-left, top-right, bottom-left, bottom-right. */
-  'window:start-resize': { args: [direction: string]; result: void }
-  'window:stop-resize': { args: []; result: void }
+  /** Begin a custom resize: returns initial bounds + min size, or null if not resizable. */
+  'window:start-resize': { args: [direction: string]; result: { x: number; y: number; width: number; height: number; minWidth: number; minHeight: number } | null }
+  /** Set window position and size (used during custom resize). */
+  'window:set-bounds': { args: [x: number, y: number, width: number, height: number]; result: void }
 
   /** Is this video Chromium-playable as-is, and how long is it? */
   'media:video-plan': { args: [path: string]; result: { direct: boolean; durationSec: number } }

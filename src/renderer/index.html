@@ -70,13 +70,28 @@
     <div id="addon-layer"></div>
     <script>
       document.querySelectorAll('.rh').forEach(el => {
-        el.addEventListener('mousedown', e => {
+        let rs = null
+        el.addEventListener('pointerdown', async (e) => {
           e.preventDefault()
-          window.ampwinNative.invoke('window:start-resize', el.dataset.dir)
+          el.setPointerCapture(e.pointerId)
+          const init = await window.ampwinNative.invoke('window:start-resize', el.dataset.dir)
+          if (init) rs = { dir: el.dataset.dir, sx: e.screenX, sy: e.screenY, init }
         })
-      })
-      document.addEventListener('mouseup', () => {
-        window.ampwinNative.invoke('window:stop-resize')
+        el.addEventListener('pointermove', (e) => {
+          if (!rs) return
+          const dx = e.screenX - rs.sx, dy = e.screenY - rs.sy
+          const i = rs.init
+          let x = i.x, y = i.y, w = i.width, h = i.height
+          if (rs.dir.includes('right'))  w = Math.max(i.minWidth, i.width + dx)
+          if (rs.dir.includes('bottom')) h = Math.max(i.minHeight, i.height + dy)
+          if (rs.dir.includes('left'))   { w = Math.max(i.minWidth, i.width - dx); x = i.x + i.width - w }
+          if (rs.dir.includes('top'))    { h = Math.max(i.minHeight, i.height - dy); y = i.y + i.height - h }
+          window.ampwinNative.invoke('window:set-bounds', x, y, w, h)
+        })
+        el.addEventListener('pointerup', (e) => {
+          el.releasePointerCapture(e.pointerId)
+          rs = null
+        })
       })
     </script>
     <script type="module" src="./src/shell.ts"></script>
